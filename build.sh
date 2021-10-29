@@ -4,7 +4,7 @@ rm -f config.status
 
 # BUILD
 ./autogen.sh
-./configure CFLAGS="-Wall -O2 -fomit-frame-pointer"
+./configure CFLAGS="-Wall -O2 -fomit-frame-pointer" target_os="x86_64-pc-linux-gnu"
 make -j$(nproc)
 strip -s sugarmaker
 
