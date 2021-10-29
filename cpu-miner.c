@@ -110,6 +110,7 @@ enum algos {
 	ALGO_ITC_YESPOWER_1_0_1,
 	ALGO_MBC_YESPOWER_1_0_1,
 	ALGO_YTN_YESPOWER_1_0_1,
+	ALGO_TDC_YESPOWER_1_0_1,
 };
 
 static const char *algo_names[] = {
@@ -122,6 +123,7 @@ static const char *algo_names[] = {
 	[ALGO_ITC_YESPOWER_1_0_1]	= "YespowerItc",
 	[ALGO_MBC_YESPOWER_1_0_1]	= "YespowerMbc",
 	[ALGO_YTN_YESPOWER_1_0_1]	= "YespowerYtn",
+	[ALGO_TDC_YESPOWER_1_0_1]	= "YespowerTdc",
 };
 
 bool opt_debug = false;
@@ -1225,6 +1227,9 @@ static void *miner_thread(void *userdata)
 			case ALGO_YTN_YESPOWER_1_0_1:
 				max64 = 499;
 				break;
+		    case ALGO_TDC_YESPOWER_1_0_1:
+				max64 = 499;
+				break;
 			}
 		}
 		if (work.data[19] + max64 > end_nonce)
@@ -1288,6 +1293,12 @@ static void *miner_thread(void *userdata)
 
 		case ALGO_YTN_YESPOWER_1_0_1:
 			rc = scanhash_ytn_yespower(
+				thr_id, work.data, work.target, max_nonce, &hashes_done
+			);
+			break;
+
+		case ALGO_TDC_YESPOWER_1_0_1:
+			rc = scanhash_tidecoin_yespower(
 				thr_id, work.data, work.target, max_nonce, &hashes_done
 			);
 			break;

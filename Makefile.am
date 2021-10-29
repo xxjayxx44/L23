@@ -19,6 +19,7 @@ sugarmaker_SOURCES	=	elist.h miner.h compat.h \
 									sha2.c \
 									yespower-1.0.1/sha256.c yespower-1.0.1/yespower-opt.c \
 									YespowerSugar.c \
+									YespowerTidecoin.c \
 									YespowerIso.c \
 									YespowerNull.c \
 									YespowerUrx.c \
