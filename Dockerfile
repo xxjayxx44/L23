@@ -14,9 +14,7 @@ RUN             apt-get update -qq && \
 RUN             git clone https://github.com/likli/sugarmaker
 
 RUN             cd sugarmaker && \
-                ./autogen.sh && \
-                ./configure CFLAGS='-O2 -fomit-frame-pointer' && \
-                make
+                ./build-armv7l.sh
 
 WORKDIR         /sugarmaker
-ENTRYPOINT      ["./sugarmaker"]
+#ENTRYPOINT      ["./sugarmaker"]

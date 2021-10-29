@@ -32,20 +32,5 @@ rm -f config.status
 # ./configure --with-curl="/usr/local/" --with-crypto="/usr/local/" CFLAGS="-Wall -O2 -fomit-frame-pointer" LDFLAGS="-static -I/usr/local/lib/ -L/usr/local/lib/libcrypto.a" LIBS="-lssl -lcrypto -lz -lpthread -ldl" CFLAGS="-DCURL_STATICLIB" --with-crypto
 ./configure --with-curl="/usr/local/" --with-crypto="/usr/local/" CFLAGS="-Wall -O2 -fomit-frame-pointer" LDFLAGS="-static" LIBS="-ldl -lz"
 make
-strip -s sugarmaker
 
-# CHECK STATIC
-file sugarmaker | grep "statically linked"
 
-# PACKAGE
-RELEASE=sugarmaker-v2.5.0-sugar4-armv7l
-rm -rf $RELEASE
-mkdir $RELEASE
-cp ./mining-script/sh/*.sh $RELEASE/
-cp sugarmaker $RELEASE/
-
-# SIGN
-zip -X $RELEASE/$RELEASE.zip $RELEASE/*
-sha256sum $RELEASE/$RELEASE.zip > $RELEASE/$RELEASE
-gpg --digest-algo sha256 --clearsign $RELEASE/$RELEASE
-rm $RELEASE/$RELEASE && cat $RELEASE/$RELEASE.asc
