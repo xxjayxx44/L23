@@ -10,12 +10,13 @@ MAINTAINER      kanon <60179867+decryp2kanon@users.noreply.github.com>
 
 RUN             apt-get update -qq && \
                 apt-get install -qqy automake libcurl4-openssl-dev git make gcc
-RUN ls
 
 RUN             git clone https://github.com/likli/sugarmaker
 
 RUN             cd sugarmaker && \
-                ./build-armv7l.sh
+                ./autogen.sh && \
+                ./configure CFLAGS='-O2 -fomit-frame-pointer' && \
+                make
 
 WORKDIR         /sugarmaker
-#ENTRYPOINT      ["./sugarmaker"]
+ENTRYPOINT      ["./sugarmaker"]
