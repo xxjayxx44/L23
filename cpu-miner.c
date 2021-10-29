@@ -191,6 +191,7 @@ Options:\n\
                           YespowerLitb:  LightBit\n\
                           YespowerIots:  IOTS\n\
                           YespowerItc:   Intercoin\n\
+                          YespowerTdc:   Tidecoin\n\
                           YespowerMbc:   power2b for MicroBitcoin\n\
                           YespowerYtn:   Yenten (N4096, r16, NULL)\n\
   -o, --url=URL         URL of mining server\n\
