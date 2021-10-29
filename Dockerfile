@@ -8,8 +8,8 @@
 FROM            ubuntu:16.04
 
 RUN             apt-get update -qq && \
-                apt-get install -qqy automake libcurl4-openssl-dev git make gcc build-essential autotools-dev libtool sudo wget
-
+                apt-get install -qqy automake libcurl4-openssl-dev git make gcc build-essential autotools-dev libtool sudo wget libssl-dev
+RUN ls
 RUN             git clone https://github.com/likli/sugarmaker
 
 RUN             cd sugarmaker && \
