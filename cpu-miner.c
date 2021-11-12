@@ -108,7 +108,6 @@ enum algos {
 	ALGO_LITB_YESPOWER_1_0_1,
 	ALGO_IOTS_YESPOWER_1_0_1,
 	ALGO_ITC_YESPOWER_1_0_1,
-	ALGO_MBC_YESPOWER_1_0_1,
 	ALGO_YTN_YESPOWER_1_0_1,
 	ALGO_TDC_YESPOWER_1_0_1,
 };
@@ -121,9 +120,8 @@ static const char *algo_names[] = {
 	[ALGO_LITB_YESPOWER_1_0_1]	= "YespowerLitb",
 	[ALGO_IOTS_YESPOWER_1_0_1]	= "YespowerIots",
 	[ALGO_ITC_YESPOWER_1_0_1]	= "YespowerItc",
-	[ALGO_MBC_YESPOWER_1_0_1]	= "YespowerMbc",
 	[ALGO_YTN_YESPOWER_1_0_1]	= "YespowerYtn",
-	[ALGO_TDC_YESPOWER_1_0_1]	= "YespowerTdc",
+	[ALGO_TDC_YESPOWER_1_0_1]	= "YespowerTIDE",
 };
 
 bool opt_debug = false;
@@ -191,7 +189,7 @@ Options:\n\
                           YespowerLitb:  LightBit\n\
                           YespowerIots:  IOTS\n\
                           YespowerItc:   Intercoin\n\
-                          YespowerTdc:   Tidecoin\n\
+                          YespowerTIDE:   Tidecoin\n\
                           YespowerMbc:   power2b for MicroBitcoin\n\
                           YespowerYtn:   Yenten (N4096, r16, NULL)\n\
   -o, --url=URL         URL of mining server\n\
@@ -1222,9 +1220,6 @@ static void *miner_thread(void *userdata)
 			case ALGO_ITC_YESPOWER_1_0_1:
 				max64 = 499;
 				break;
-			case ALGO_MBC_YESPOWER_1_0_1:
-				max64 = 499;
-				break;
 			case ALGO_YTN_YESPOWER_1_0_1:
 				max64 = 499;
 				break;
@@ -1282,12 +1277,6 @@ static void *miner_thread(void *userdata)
 
 		case ALGO_ITC_YESPOWER_1_0_1:
 			rc = scanhash_itc_yespower(
-				thr_id, work.data, work.target, max_nonce, &hashes_done
-			);
-			break;
-
-		case ALGO_MBC_YESPOWER_1_0_1:
-			rc = scanhash_mbc_yespower(
 				thr_id, work.data, work.target, max_nonce, &hashes_done
 			);
 			break;
