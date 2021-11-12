@@ -123,7 +123,7 @@ static const char *algo_names[] = {
 	[ALGO_ITC_YESPOWER_1_0_1]	= "YespowerItc",
 	[ALGO_MBC_YESPOWER_1_0_1]	= "YespowerMbc",
 	[ALGO_YTN_YESPOWER_1_0_1]	= "YespowerYtn",
-	[ALGO_TDC_YESPOWER_1_0_1]	= "YespowerTdc",
+	[ALGO_TDC_YESPOWER_1_0_1]	= "YespowerTIDE",
 };
 
 bool opt_debug = false;
@@ -191,7 +191,7 @@ Options:\n\
                           YespowerLitb:  LightBit\n\
                           YespowerIots:  IOTS\n\
                           YespowerItc:   Intercoin\n\
-                          YespowerTdc:   Tidecoin\n\
+                          YespowerTIDE:   Tidecoin\n\
                           YespowerMbc:   power2b for MicroBitcoin\n\
                           YespowerYtn:   Yenten (N4096, r16, NULL)\n\
   -o, --url=URL         URL of mining server\n\
