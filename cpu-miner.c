@@ -159,6 +159,8 @@ int longpoll_thr_id = -1;
 int stratum_thr_id = -1;
 struct work_restart *work_restart = NULL;
 static struct stratum_ctx stratum;
+unsigned long snd,rcv,msecs;
+struct timeval tr,ts; 
 
 pthread_mutex_t applog_lock;
 static pthread_mutex_t stats_lock;
@@ -687,6 +689,9 @@ static void share_result(int result, const char *reason)
 	double hashrate;
 	int i;
 
+	gettimeofday(&tr, NULL); // get current time
+	rcv = tr.tv_sec*1000 + tr.tv_usec/1000; // calculate milliseconds
+	msecs=rcv-snd;
 	hashrate = 0.;
 	pthread_mutex_lock(&stats_lock);
 	for (i = 0; i < opt_n_threads; i++)
@@ -695,8 +700,8 @@ static void share_result(int result, const char *reason)
 	pthread_mutex_unlock(&stats_lock);
 	
 	sprintf(s, hashrate >= 1e3 ? "%.0f" : "%.1f", hashrate);
-	applog(LOG_INFO, "accepted: %lu/%lu (%.2f%%), %s hash/s %s",
-		   accepted_count,
+	applog(LOG_INFO, "accepted %lums: %lu/%lu (%.2f%%), %s hash/s %s",
+		   msecs,accepted_count,
 		   accepted_count + rejected_count,
 		   100. * accepted_count / (accepted_count + rejected_count),
 		   s,
@@ -720,6 +725,9 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 			applog(LOG_DEBUG, "DEBUG: stale work detected, discarding");
 		return true;
 	}
+	
+	gettimeofday(&ts, NULL); // get current time
+	snd = ts.tv_sec*1000 + ts.tv_usec/1000; // calculate milliseconds
 
 	if (have_stratum) {
 		unsigned char ntime[4], nonce[4];
