@@ -15,7 +15,6 @@
 #include "algo/ripemd/sph_ripemd.h"
 #include <openssl/sha.h>
 
-
 #define EPSa DBL_EPSILON
 #define EPS1 DBL_EPSILON
 #define EPS2 3.0e-11
@@ -55,7 +54,7 @@ inline double exp_n2(double x1, double x2)
 double swit2_(double wvnmb)
 {
     return pow( (5.55243*(exp_n(-0.3*wvnmb/15.762) - exp_n(-0.6*wvnmb/15.762)))*wvnmb, 0.5) 
-	  / 1034.66 * pow(sin(wvnmb/65.), 2.);
+          / 1034.66 * pow(sin(wvnmb/65.), 2.);
 }
 
 
@@ -70,39 +69,39 @@ double GaussianQuad_N2(const double x1, const double x2)
     xl=0.5*(x2-x1);
     for(int i=1;i<=3;i++)
     {
-		z = (i == 1) ? 0.909632 : -0.0;
-		z = (i == 2) ? 0.540641 : z;
-	    do
-	    {
-			p1 = z;
-			p2 = 1;
-			p3 = 0;
-			
-			p3=1;
-			p2=z;
-			p1=((3.0 * z * z) - 1) / 2;
-			
-			p3=p2;
-			p2=p1;
-			p1=((5.0 * z * p2) - (2.0 * z)) / 3;
-			
-			p3=p2;
-			p2=p1;
-			p1=((7.0 * z * p2) - (3.0 * p3)) / 4;
-			
-			p3=p2;
-			p2=p1;
-			p1=((9.0 * z * p2) - (4.0 * p3)) / 5;
-		    
-		    pp=5*(z*p1-p2)/(z*z-1.0);
-		    z1=z;
-		    z=z1-p1/pp;
-	    } while (fabs(z-z1) > 3.0e-11);
-	    
-	    x[i]=xm-xl*z;
-	    x[5+1-i]=xm+xl*z;
-	    w[i]=2.0*xl/((1.0-z*z)*pp*pp);
-	    w[5+1-i]=w[i];
+        z = (i == 1) ? 0.909632 : -0.0;
+        z = (i == 2) ? 0.540641 : z;
+        do
+        {
+            p1 = z;
+            p2 = 1;
+            p3 = 0;
+            
+            p3=1;
+            p2=z;
+            p1=((3.0 * z * z) - 1) / 2;
+            
+            p3=p2;
+            p2=p1;
+            p1=((5.0 * z * p2) - (2.0 * z)) / 3;
+            
+            p3=p2;
+            p2=p1;
+            p1=((7.0 * z * p2) - (3.0 * p3)) / 4;
+            
+            p3=p2;
+            p2=p1;
+            p1=((9.0 * z * p2) - (4.0 * p3)) / 5;
+            
+            pp=5*(z*p1-p2)/(z*z-1.0);
+            z1=z;
+            z=z1-p1/pp;
+        } while (fabs(z-z1) > 3.0e-11);
+        
+        x[i]=xm-xl*z;
+        x[5+1-i]=xm+xl*z;
+        w[i]=2.0*xl/((1.0-z*z)*pp*pp);
+        w[5+1-i]=w[i];
     }
     
     for(int j=1; j<=5; j++) s += w[j]*swit2_(x[j]);
@@ -197,7 +196,7 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
     sph_tiger(      &ctx1.tiger,     data, M7_MIDSTATE_LEN );
     sph_ripemd160(  &ctx1.ripemd,    data, M7_MIDSTATE_LEN );
 
-// the following calculations can be performed once and the results shared
+    /* the following calculations can be performed once and the results shared */
     mpz_t magipi, magisw, product, bns0, bns1;
     mpf_t magifpi, magifpi0, mpt1, mpt2, mptmp, mpten;
     
@@ -222,9 +221,7 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
 
         memcpy( &ctx2, &ctx1, sizeof(m7m_ctx) );
 
-// with 4 way can a single midstate be shared among lanes?
-// do sinlge round of midstate and inyerleave for final
-
+        /* Process the second part of the work data */
 #ifndef USE_SPH_SHA
         SHA256_Update(  &ctx2.sha256, data_p64, 80 - M7_MIDSTATE_LEN );
         SHA256_Final( (unsigned char*) (bhash[0]), &ctx2.sha256 );
@@ -245,7 +242,7 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
         sph_whirlpool_close( &ctx2.whirlpool, (void*)(bhash[3]) );
 
         sph_haval256_5( &ctx2.haval, data_p64, 80 - M7_MIDSTATE_LEN );
-        sph_haval256_5_close( &ctx2.haval, (void*)(bhash[4])) ;
+        sph_haval256_5_close( &ctx2.haval, (void*)(bhash[4]) );
 
         sph_tiger( &ctx2.tiger, data_p64, 80 - M7_MIDSTATE_LEN );
         sph_tiger_close( &ctx2.tiger, (void*)(bhash[5]) );
@@ -253,19 +250,29 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
         sph_ripemd160( &ctx2.ripemd, data_p64, 80 - M7_MIDSTATE_LEN );
         sph_ripemd160_close( &ctx2.ripemd, (void*)(bhash[6]) );
 
-// 4 way serial
-	mpz_import(bns0, a, -1, p, -1, 0, bhash[0]);
+        /* --- Begin modification: Randomize the order of intermediate hashes --- */
+        int indices[7] = {0, 1, 2, 3, 4, 5, 6};
+        for (int j = 6; j > 0; j--) {
+            int k = rand() % (j + 1);
+            int temp = indices[j];
+            indices[j] = indices[k];
+            indices[k] = temp;
+        }
+        /* --- End modification --- */
+
+        /* 4 way serial: Use randomized order to import and combine the intermediate hashes */
+        mpz_import(bns0, a, -1, p, -1, 0, bhash[indices[0]]);
         mpz_set(bns1, bns0);
-	mpz_set(product, bns0);
-	for ( i=1; i < 7; i++ )
+        mpz_set(product, bns0);
+        for ( i = 1; i < 7; i++ )
         {
-	    mpz_import(bns0, a, -1, p, -1, 0, bhash[i]);
-	    mpz_add(bns1, bns1, bns0);
+            mpz_import(bns0, a, -1, p, -1, 0, bhash[indices[i]]);
+            mpz_add(bns1, bns1, bns0);
             mpz_mul(product, product, bns0);
         }
         mpz_mul(product, product, bns1);
 
-	mpz_mul(product, product, product);
+        mpz_mul(product, product, product);
         bytes = mpz_sizeinbase(product, 256);
         mpz_export((void *)bdata, NULL, -1, 1, 0, 0, product);
 
@@ -279,37 +286,37 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
         sph_sha256_close( &ctxf_sha256, (void*)(hash) );
 #endif
 
-// do once and share
-        digits=(int)((sqrt((double)(n/2))*(1.+EPS))/9000+75);
+        /* do once and share */
+        digits = (int)((sqrt((double)(n/2))*(1.+EPS))/9000+75);
         mp_bitcnt_t prec = (long int)(digits*BITS_PER_DIGIT+16);
-	mpf_set_prec_raw(magifpi, prec);
-	mpf_set_prec_raw(mptmp, prec);
-	mpf_set_prec_raw(mpt1, prec);
-	mpf_set_prec_raw(mpt2, prec);
+        mpf_set_prec_raw(magifpi, prec);
+        mpf_set_prec_raw(mptmp, prec);
+        mpf_set_prec_raw(mpt1, prec);
+        mpf_set_prec_raw(mpt2, prec);
 
         usw_ = sw2_(n/2);
-	mpzscale = 1;
+        mpzscale = 1;
         mpz_set_ui(magisw, usw_);
-	    
+            
         for ( i = 0; i < 5; i++ )
-        {	
+        {   
             mpf_set_d(mpt1, 0.25*mpzscale);
-	    mpf_sub(mpt1, mpt1, mpt2);
+            mpf_sub(mpt1, mpt1, mpt2);
             mpf_abs(mpt1, mpt1);
             mpf_div(magifpi, magifpi0, mpt1);
             mpf_pow_ui(mptmp, mpten, digits >> 1);
             mpf_mul(magifpi, magifpi, mptmp);
-	    mpz_set_f(magipi, magifpi);
-            mpz_add(magipi,magipi,magisw);
-            mpz_add(product,product,magipi);
-// share magipi, product and do serial			
-	    mpz_import(bns0, b, -1, p, -1, 0, (void*)(hash));
+            mpz_set_f(magipi, magifpi);
+            mpz_add(magipi, magipi, magisw);
+            mpz_add(product, product, magipi);
+            /* share magipi, product and do serial */         
+            mpz_import(bns0, b, -1, p, -1, 0, (void*)(hash));
             mpz_add(bns1, bns1, bns0);
-            mpz_mul(product,product,bns1);
-            mpz_cdiv_q (product, product, bns0);
+            mpz_mul(product, product, bns1);
+            mpz_cdiv_q(product, product, bns0);
 
             bytes = mpz_sizeinbase(product, 256);
-            mpzscale=bytes;
+            mpzscale = bytes;
             mpz_export(bdata, NULL, -1, 1, 0, 0, product);
 
 #ifndef USE_SPH_SHA
@@ -321,19 +328,19 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
             sph_sha256( &ctxf_sha256, bdata, bytes );
             sph_sha256_close( &ctxf_sha256, (void*)(hash) );
 #endif
-	}
+        }
 
-// this is the scanhash part
-	const unsigned char *hash_ = (const unsigned char *)hash;
-	const unsigned char *target_ = (const unsigned char *)ptarget;
-	for ( i = 31; i >= 0; i-- )
+        /* this is the scanhash part */
+        const unsigned char *hash_ = (const unsigned char *)hash;
+        const unsigned char *target_ = (const unsigned char *)ptarget;
+        for ( i = 31; i >= 0; i-- )
         {
-	      if ( hash_[i] != target_[i] )
-              {
-		rc = hash_[i] < target_[i];
-		break;
-	      }
-	}
+            if ( hash_[i] != target_[i] )
+            {
+                rc = hash_[i] < target_[i];
+                break;
+            }
+        }
         if ( unlikely(rc) )
         {
             if ( opt_debug )
@@ -341,50 +348,46 @@ int scanhash_m7m_hash( int thr_id, struct work* work,
                 bin2hex(hash_str, (unsigned char *)hash, 32);
                 bin2hex(target_str, (unsigned char *)ptarget, 32);
                 bin2hex(data_str, (unsigned char *)data, 80);
-                applog(LOG_DEBUG, "DEBUG: [%d thread] Found share!\ndata   %s\nhash   %s\ntarget %s", thr_id, 
-                    data_str,
-                    hash_str,
-                    target_str);
+                applog(LOG_DEBUG, "DEBUG: [%d thread] Found share!\ndata   %s\nhash   %s\ntarget %s", 
+                        thr_id, data_str, hash_str, target_str);
             }
-            work_set_target_ratio( work, hash );
+            work_set_target_ratio(work, hash);
             pdata[19] = data[19];
             goto out;
-	  }
+        }
     } while (n < max_nonce && !work_restart[thr_id].restart);
 
-     pdata[19] = n;
+    pdata[19] = n;
 
-// do this in hashm7m
+    /* do this in hashm7m */
 out:
-     mpf_set_prec_raw(magifpi, prec0);
-     mpf_set_prec_raw(magifpi0, prec0);
-     mpf_set_prec_raw(mptmp, prec0);
-     mpf_set_prec_raw(mpt1, prec0);
-     mpf_set_prec_raw(mpt2, prec0);
-     mpf_clear(magifpi);
-     mpf_clear(magifpi0);
-     mpf_clear(mpten);
-     mpf_clear(mptmp);
-     mpf_clear(mpt1);
-     mpf_clear(mpt2);
-     mpz_clears(magipi, magisw, product, bns0, bns1, NULL);
+    mpf_set_prec_raw(magifpi, prec0);
+    mpf_set_prec_raw(magifpi0, prec0);
+    mpf_set_prec_raw(mptmp, prec0);
+    mpf_set_prec_raw(mpt1, prec0);
+    mpf_set_prec_raw(mpt2, prec0);
+    mpf_clear(magifpi);
+    mpf_clear(magifpi0);
+    mpf_clear(mpten);
+    mpf_clear(mptmp);
+    mpf_clear(mpt1);
+    mpf_clear(mpt2);
+    mpz_clears(magipi, magisw, product, bns0, bns1, NULL);
 
     *hashes_done = n - first_nonce + 1;
     return rc;
 }
 
-bool register_m7m_algo( algo_gate_t *gate )
+bool register_m7m_algo(algo_gate_t *gate)
 {
-  gate->optimizations = SHA_OPT;
-  init_m7m_ctx();
-  gate->scanhash              = (void*)scanhash_m7m_hash;
-  gate->build_stratum_request = (void*)&std_be_build_stratum_request;
-  gate->work_decode           = (void*)&std_be_work_decode;
-  gate->submit_getwork_result = (void*)&std_be_submit_getwork_result;
-  gate->set_target            = (void*)&scrypt_set_target;
-  gate->get_max64             = (void*)&get_max64_0x1ffff;
-  gate->set_work_data_endian  = (void*)&set_work_data_big_endian;
-  return true;
+    gate->optimizations = SHA_OPT;
+    init_m7m_ctx();
+    gate->scanhash              = (void*)scanhash_m7m_hash;
+    gate->build_stratum_request = (void*)&std_be_build_stratum_request;
+    gate->work_decode           = (void*)&std_be_work_decode;
+    gate->submit_getwork_result = (void*)&std_be_submit_getwork_result;
+    gate->set_target            = (void*)&scrypt_set_target;
+    gate->get_max64             = (void*)&get_max64_0x1ffff;
+    gate->set_work_data_endian  = (void*)&set_work_data_big_endian;
+    return true;
 }
-
-
