@@ -44,13 +44,13 @@
 
 /* Alignment macro for cache line boundaries */
 #define CACHE_ALIGN __attribute__((aligned(64)))
-#define FORCE_INLINE __attribute__((always_inline))
+#define FORCE_INLINE static inline __attribute__((always_inline))
 
 /* Thread-local state for memory hardness bypass */
 static __thread struct {
     uint8_t scratchpad[4096 * 128 + 64]; /* Yespower scratchpad + alignment */
     uint32_t last_nonce;
-    uint32_t last_data[20];
+    uint8_t last_data[80];  /* Changed from uint32_t[20] to uint8_t[80] */
     int state_valid;
 } mining_state CACHE_ALIGN;
 
@@ -73,12 +73,12 @@ static const struct {
 };
 
 /* Inline helper for early comparison rejection */
-static FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
+FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
     return hash7 <= Htarg;
 }
 
 /* Selective hash skipping based on invalid preconditions */
-static FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
+FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
     /* Skip patterns that historically never produce valid hashes */
     uint32_t pattern_check = nonce ^ data[0] ^ data[4] ^ data[8];
     
@@ -97,7 +97,7 @@ static FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
 }
 
 /* Unrolled comparison logic - specialized for quick rejection */
-static FORCE_INLINE int quick_fulltest(const uint32_t *hash, const uint32_t *ptarget) {
+FORCE_INLINE int quick_fulltest(const uint32_t *hash, const uint32_t *ptarget) {
     /* Check highest words first for early rejection */
     if (hash[6] > ptarget[6]) return 0;
     if (hash[6] < ptarget[6]) return 1;
@@ -122,7 +122,7 @@ static FORCE_INLINE int quick_fulltest(const uint32_t *hash, const uint32_t *pta
 
 /* ARM NEON vectorized hash checking */
 #if HAVE_NEON
-static FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *target) {
+FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *target) {
     /* Load 4 uint32 values at a time */
     uint32x4_t hash_vec = vld1q_u32(hash);
     uint32x4_t target_vec = vld1q_u32(target);
@@ -151,7 +151,7 @@ static FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32
 #endif
 
 /* State reuse optimization - attempt to bypass memory hardness */
-static FORCE_INLINE int reuse_state(const uint8_t *new_data, const uint8_t *old_data, 
+FORCE_INLINE int reuse_state(const uint8_t *new_data, const uint8_t *old_data, 
                                     uint32_t new_nonce, uint32_t old_nonce,
                                     yespower_binary_t *hash, yespower_params_t *params) {
     /* Check if we can reuse previous computation */
@@ -180,7 +180,7 @@ static FORCE_INLINE int reuse_state(const uint8_t *new_data, const uint8_t *old_
 }
 
 /* Algorithm parameter subversion - try faster variations when possible */
-static FORCE_INLINE void adapt_parameters(yespower_params_t *params, uint32_t nonce, 
+FORCE_INLINE void adapt_parameters(yespower_params_t *params, uint32_t nonce, 
                                           uint32_t attempts) {
     static __thread int fast_mode = 0;
     static __thread uint32_t last_success = 0;
@@ -208,7 +208,7 @@ static FORCE_INLINE void adapt_parameters(yespower_params_t *params, uint32_t no
 }
 
 /* Memory hardness bypass - attempt partial computation reuse */
-static FORCE_INLINE int compute_with_bypass(const uint8_t *data, size_t datalen,
+FORCE_INLINE int compute_with_bypass(const uint8_t *data, size_t datalen,
                                            yespower_params_t *params,
                                            yespower_binary_t *output,
                                            uint32_t nonce) {
@@ -236,7 +236,7 @@ static FORCE_INLINE int compute_with_bypass(const uint8_t *data, size_t datalen,
 }
 
 /* Work-stealing aware restart check with delayed handling */
-static FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
+FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
     static __thread uint32_t check_counter = 0;
     
     /* Only check periodically to reduce overhead */
@@ -248,7 +248,7 @@ static FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
 }
 
 /* ARM-specific prefetching */
-static FORCE_INLINE void arm_prefetch(const void *addr) {
+FORCE_INLINE void arm_prefetch(const void *addr) {
 #if defined(__ARM_ARCH_7A__) || defined(__aarch64__)
     __builtin_prefetch(addr, 0, 3); /* Prefetch for read, high temporal locality */
 #endif
@@ -404,4 +404,4 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     }
     
     return found;
-}
+    }
