@@ -34,7 +34,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <x86intrin.h>  /* For SSE/AVX intrinsics */
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>  /* For ARM NEON intrinsics */
+#define HAVE_NEON 1
+#elif defined(__SSE2__)
+#include <x86intrin.h> /* For SSE/AVX intrinsics */
+#endif
 
 /* Alignment macro for cache line boundaries */
 #define CACHE_ALIGN __attribute__((aligned(64)))
@@ -113,6 +119,36 @@ static FORCE_INLINE int quick_fulltest(const uint32_t *hash, const uint32_t *pta
     
     return hash[0] <= ptarget[0];
 }
+
+/* ARM NEON vectorized hash checking */
+#if HAVE_NEON
+static FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *target) {
+    /* Load 4 uint32 values at a time */
+    uint32x4_t hash_vec = vld1q_u32(hash);
+    uint32x4_t target_vec = vld1q_u32(target);
+    
+    /* Compare hash < target */
+    uint32x4_t cmp_lt = vcltq_u32(hash_vec, target_vec);
+    uint32x4_t cmp_eq = vceqq_u32(hash_vec, target_vec);
+    
+    /* Extract comparison results */
+    uint32_t cmp_lt_mask = vgetq_lane_u32(cmp_lt, 0) | 
+                          (vgetq_lane_u32(cmp_lt, 1) << 1) |
+                          (vgetq_lane_u32(cmp_lt, 2) << 2) |
+                          (vgetq_lane_u32(cmp_lt, 3) << 3);
+    
+    uint32_t cmp_eq_mask = vgetq_lane_u32(cmp_eq, 0) | 
+                          (vgetq_lane_u32(cmp_eq, 1) << 1) |
+                          (vgetq_lane_u32(cmp_eq, 2) << 2) |
+                          (vgetq_lane_u32(cmp_eq, 3) << 3);
+    
+    /* If any hash < target, return true */
+    if (cmp_lt_mask) return 1;
+    
+    /* If all equal up to this point, need to check remaining words */
+    return cmp_eq_mask == 0xF;
+}
+#endif
 
 /* State reuse optimization - attempt to bypass memory hardness */
 static FORCE_INLINE int reuse_state(const uint8_t *new_data, const uint8_t *old_data, 
@@ -211,16 +247,12 @@ static FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
     return 0;
 }
 
-/* Vectorized hash checking using SSE/AVX when available */
-#ifdef __SSE2__
-static FORCE_INLINE int vectorized_check(const uint32_t *hash, const uint32_t *target) {
-    __m128i hash_vec = _mm_load_si128((const __m128i*)hash);
-    __m128i target_vec = _mm_load_si128((const __m128i*)target);
-    __m128i cmp = _mm_cmplt_epi32(hash_vec, target_vec);
-    int mask = _mm_movemask_epi8(cmp);
-    return mask != 0;
-}
+/* ARM-specific prefetching */
+static FORCE_INLINE void arm_prefetch(const void *addr) {
+#if defined(__ARM_ARCH_7A__) || defined(__aarch64__)
+    __builtin_prefetch(addr, 0, 3); /* Prefetch for read, high temporal locality */
 #endif
+}
 
 int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
@@ -272,7 +304,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     }
     
     /* Prefetch target for faster comparisons */
-    __builtin_prefetch(local_ptarget, 0, 3);
+    arm_prefetch(local_ptarget);
     
     /* Aggressive work stealing with adaptive interval */
     uint32_t restart_check_interval = 256;
@@ -321,9 +353,9 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                     temp_hash[i] = le32dec(&hash.u32[i]);
                 }
                 
-#ifdef __SSE2__
-                /* Use vectorized check when available */
-                if (vectorized_check(temp_hash, local_ptarget)) {
+#if HAVE_NEON
+                /* Use NEON vectorized check for ARM */
+                if (neon_vectorized_check(temp_hash, local_ptarget)) {
 #else
                 if (quick_fulltest(temp_hash, local_ptarget)) {
 #endif
