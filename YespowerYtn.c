@@ -457,7 +457,7 @@ FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
 #endif
 }
 
-/* Fixed convert_hash function - removes NEON issue and ensures identical hash output */
+/* Fixed convert_hash function - ensures identical hash output */
 FORCE_INLINE void convert_hash(uint32_t *dest, const uint32_t *src, int count) {
     /* Use portable byte swapping to ensure identical hash output */
     for (int i = 0; i < count; i++) {
@@ -503,7 +503,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     } CACHE_ALIGN hash;
     
     /* Keep hot data */
-    uint32_t n = pdata[19];  /* Removed register keyword to allow taking address */
+    uint32_t n = pdata[19];
     const uint32_t Htarg = ptarget[7];
     uint32_t local_max_nonce = max_nonce;
     const uint32_t *local_ptarget = ptarget;
@@ -545,4 +545,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                     encode_nonce(data.u32, stolen_nonce);
                     
                     if (compute_hash(data.u8, &hash.yb, stolen_nonce)) {
-             
+                        abort();
+                    }
+                    
+                
