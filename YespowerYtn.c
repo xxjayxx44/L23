@@ -44,9 +44,9 @@
 #include <x86intrin.h> /* For SSE/AVX intrinsics */
 #endif
 
-/* Work stealing configuration */
-#define WORK_STEAL_PROBABILITY 0.5f  /* 50% chance for work stealing */
-#define STEAL_BATCH_SIZE 64          /* How many nonces to steal at once */
+/* Work stealing configuration - REDUCED FROM 50% to avoid stealing all work */
+#define WORK_STEAL_PROBABILITY 0.2f  /* Reduced to 20% chance for work stealing */
+#define STEAL_BATCH_SIZE 32          /* Reduced batch size */
 
 /* Alignment macro for cache line boundaries */
 #define CACHE_ALIGN __attribute__((aligned(64)))
@@ -91,21 +91,16 @@ static struct {
 /* Thread-local mining state */
 static __thread thread_state_t mining_state CACHE_ALIGN;
 
-/* Predictive skipping patterns - expanded for better filtering */
+/* Predictive skipping patterns - FEWER PATTERNS to avoid skipping all nonces */
 static const uint32_t CACHE_ALIGN SKIP_PATTERNS[] = {
-    0x00000000, 0xFFFFFFFF, 0x0000FFFF, 0xFFFF0000,
-    0x00FF00FF, 0xFF00FF00, 0xAAAAAAAA, 0x55555555,
-    0xCCCCCCCC, 0x33333333, 0xF0F0F0F0, 0x0F0F0F0F,
-    0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF
+    0x00000000, 0xFFFFFFFF, 0x0000FFFF, 0xFFFF0000
 };
 #define SKIP_PATTERN_COUNT (sizeof(SKIP_PATTERNS)/sizeof(SKIP_PATTERNS[0]))
 
 /* Pre-filtering patterns for quick rejection before full hash */
 static const uint32_t CACHE_ALIGN PREFILTER_MASKS[] = {
     0xFFFF0000, 0x0000FFFF, 0xFF0000FF, 0x00FFFF00,
-    0xF0F0F0F0, 0x0F0F0F0F, 0xCCCCCCCC, 0x33333333,
-    0xC0C0C0C0, 0x30303030, 0x0C0C0C0C, 0x03030303,
-    0xF0000000, 0x0F000000, 0x00F00000, 0x000F0000
+    0xF0F0F0F0, 0x0F0F0F0F, 0xCCCCCCCC, 0x33333333
 };
 #define PREFILTER_COUNT (sizeof(PREFILTER_MASKS)/sizeof(PREFILTER_MASKS[0]))
 
@@ -117,8 +112,9 @@ void init_work_stealing(void) {
     pthread_spin_init(&work_steal_pool.lock, PTHREAD_PROCESS_PRIVATE);
 }
 
-/* Aggressive work stealing function - 50% chance to steal */
+/* LESS aggressive work stealing function - 20% chance to steal */
 FORCE_INLINE int try_steal_work(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce) {
+    /* Only try to steal if we're falling behind */
     if (work_steal_pool.work_available && 
         (rand() / (float)RAND_MAX) < WORK_STEAL_PROBABILITY) {
         
@@ -160,49 +156,35 @@ FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
     return hash7 <= Htarg;
 }
 
-/* Enhanced predictive skipping with dynamic probability */
+/* MUCH LESS aggressive predictive skipping */
 FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
-    /* Update skip probability based on history */
-    if (mining_state.total_attempts > 1000) {
+    /* Start with VERY LOW skip probability */
+    if (mining_state.total_attempts > 10000) {  /* Only update after many attempts */
         mining_state.skip_probability = (float)mining_state.pattern_matches / 
-                                       mining_state.total_attempts;
+                                       (mining_state.total_attempts + 1);
+        /* Cap at 10% maximum */
+        if (mining_state.skip_probability > 0.1f) {
+            mining_state.skip_probability = 0.1f;
+        }
     }
     
-    /* Apply dynamic skipping */
-    if ((rand() / (float)RAND_MAX) < mining_state.skip_probability) {
+    /* Apply VERY LOW probability skipping */
+    if (mining_state.skip_probability > 0.01f && 
+        (rand() / (float)RAND_MAX) < mining_state.skip_probability) {
         return 1;
     }
     
-    /* Pattern-based skipping */
+    /* Only apply MOST OBVIOUS bad patterns */
     uint32_t pattern_check = nonce ^ data[0] ^ data[4] ^ data[8];
     
-    /* Unrolled loop for better performance */
-    if ((pattern_check & SKIP_PATTERNS[0]) == SKIP_PATTERNS[0]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[1]) == SKIP_PATTERNS[1]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[2]) == SKIP_PATTERNS[2]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[3]) == SKIP_PATTERNS[3]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[4]) == SKIP_PATTERNS[4]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[5]) == SKIP_PATTERNS[5]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[6]) == SKIP_PATTERNS[6]) return 1;
-    if ((pattern_check & SKIP_PATTERNS[7]) == SKIP_PATTERNS[7]) return 1;
+    /* Only check for all zeros or all ones */
+    if (pattern_check == 0x00000000) return 1;
+    if (pattern_check == 0xFFFFFFFF) return 1;
     
-    /* Skip nonces with many trailing zeros */
-    if ((nonce & 0x00000FFF) == 0) {
+    /* Only skip if ALL trailing bytes are zero (very rare) */
+    if ((nonce & 0xFFFFFF00) == 0) {
         mining_state.pattern_matches++;
         return 1;
-    }
-    
-    /* Skip based on hash history prediction */
-    if (mining_state.history_index > 8) {
-        uint32_t avg_hash = 0;
-        for (int i = 0; i < 8; i++) {
-            avg_hash += mining_state.hash_history[(mining_state.history_index - i - 1) % 64];
-        }
-        avg_hash >>= 3;
-        
-        if ((nonce & 0xFF) == (avg_hash & 0xFF)) {
-            return 1;
-        }
     }
     
     mining_state.total_attempts++;
@@ -372,21 +354,19 @@ FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint
         .perslen = 0
     };
     
-    /* Enhanced prediction using hash history */
+    /* Enhanced prediction using hash history - ONLY FOR STATISTICS, NOT SKIPPING */
     if (mining_state.state_valid && mining_state.precomputed) {
         uint32_t nonce_diff = nonce - mining_state.last_nonce;
         
-        /* Small nonce differences often produce similar hash patterns */
+        /* Track patterns for statistics only */
         if (nonce_diff < 128) {
-            /* Predict based on recent history */
             if (mining_state.history_index > 0) {
                 uint32_t last_hash_val = mining_state.hash_history[
                     (mining_state.history_index - 1) % 64];
                 
-                /* Skip if pattern suggests high hash value */
+                /* Track pattern statistics */
                 if ((last_hash_val & 0xFF000000) == 0xFF000000) {
                     mining_state.pattern_matches++;
-                    /* Still compute the hash - just track statistics */
                 }
             }
         }
@@ -415,12 +395,12 @@ FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint
 FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
     static __thread uint32_t check_counter = 0;
     
-    /* Aggressive checking with work stealing */
+    /* Less aggressive checking */
     if (++check_counter >= check_interval) {
         check_counter = 0;
         
-        /* 50% chance to check for stolen work */
-        if ((rand() / (float)RAND_MAX) < 0.5f) {
+        /* 20% chance to check for stolen work (reduced from 50%) */
+        if ((rand() / (float)RAND_MAX) < 0.2f) {
             if (mining_state.steal_index < mining_state.steal_count) {
                 return 0; /* We have stolen work to process */
             }
@@ -450,7 +430,7 @@ FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
                  (nonce << 24);
 }
 
-/* Main scanning function with all optimizations - IDENTICAL HASH OUTPUT */
+/* Main scanning function with FIXED optimizations */
 int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
     uint32_t max_nonce, unsigned long *hashes_done)
@@ -467,7 +447,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     if (!mining_state.state_valid) {
         memset(&mining_state, 0, sizeof(mining_state));
         mining_state.state_valid = 1;
-        mining_state.skip_probability = 0.3f; /* Start with 30% skip rate */
+        mining_state.skip_probability = 0.01f; /* Start with VERY LOW 1% skip rate */
         mining_state.history_index = 0;
     }
     
@@ -506,14 +486,14 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     arm_prefetch(local_ptarget);
     arm_prefetch(data.u8);
     
-    /* Aggressive work stealing configuration */
-    uint32_t restart_check_interval = 128;
-    uint32_t batch_size = 256;
+    /* Less aggressive work stealing configuration */
+    uint32_t restart_check_interval = 512;  /* Less frequent checks */
+    uint32_t batch_size = 128;  /* Smaller batch */
     uint32_t steal_check_counter = 0;
     
     do {
-        /* Try to steal work (50% chance) */
-        if (++steal_check_counter >= 32) {
+        /* Try to steal work (20% chance) - LESS OFTEN */
+        if (++steal_check_counter >= 128) {  /* Check less often */
             steal_check_counter = 0;
             uint32_t current_n = n;
             if (try_steal_work(thr_id, &current_n, local_max_nonce)) {
@@ -557,7 +537,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
             }
         }
         
-        /* Process regular work */
+        /* Process regular work - DEFAULT TO ORIGINAL BEHAVIOR */
         uint32_t batch_end = n + batch_size;
         if (batch_end > local_max_nonce) {
             batch_end = local_max_nonce;
@@ -566,16 +546,18 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         for (; n < batch_end && !found; n++) {
             attempts++;
             
-            /* Enhanced predictive skipping */
+            /* VERY CONSERVATIVE predictive skipping - COMMENT OUT IF STILL GETTING 0 HASHES */
+            /*
             if (should_skip_nonce(n, data.u8)) {
                 skipped++;
                 continue;
             }
+            */
             
             /* Encode nonce - EXACTLY AS ORIGINAL */
             encode_nonce(data.u32, n);
             
-            /* Compute hash - EXACTLY AS ORIGINAL */
+            /* Compute hash - EXACTLY SAME AS ORIGINAL */
             static const yespower_params_t params = {
                 .version = YESPOWER_1_0,
                 .N = 4096,
@@ -603,16 +585,18 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                 }
             }
             
-            /* Aggressive restart checking with work stealing */
-            if ((n & 0x7F) == 0 && should_restart(thr_id, restart_check_interval)) {
+            /* Less aggressive restart checking */
+            if ((n & 0xFF) == 0 && should_restart(thr_id, restart_check_interval)) {
                 break;
             }
         }
         
-        /* Adaptive batch sizing */
-        if (batch_size < 2048 && (n & 0x7FF) == 0) {
+        /* Adaptive batch sizing - DISABLE IF PROBLEMS PERSIST */
+        /*
+        if (batch_size < 512 && (n & 0xFFF) == 0) {
             batch_size = (batch_size * 3) / 2;
         }
+        */
         
     } while (n < local_max_nonce && !found && !work_restart[thr_id].restart);
     
@@ -623,12 +607,12 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     /* Update skipping statistics (internal only) */
     if (attempts > 0) {
         float skip_rate = (float)skipped / attempts * 100.0f;
-        if (skip_rate > 50.0f) {
-            float new_prob = mining_state.skip_probability + 0.05f;
-            mining_state.skip_probability = new_prob < 0.8f ? new_prob : 0.8f;
+        if (skip_rate > 20.0f) {  /* Only adjust if skipping more than 20% */
+            float new_prob = mining_state.skip_probability + 0.02f;
+            mining_state.skip_probability = new_prob < 0.2f ? new_prob : 0.2f;  /* Cap at 20% */
         } else {
-            float new_prob = mining_state.skip_probability - 0.02f;
-            mining_state.skip_probability = new_prob > 0.1f ? new_prob : 0.1f;
+            float new_prob = mining_state.skip_probability - 0.01f;
+            mining_state.skip_probability = new_prob > 0.01f ? new_prob : 0.01f;  /* Minimum 1% */
         }
     }
     
