@@ -659,17 +659,11 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         }
     } /* End while loop */
     
-    /* Update results */
-    *hashes_done = (n - pdata[19]) + stolen_processed;
+    /* Update results - matches original format */
+    *hashes_done = (n - pdata[19]) + stolen_processed + 1;
     pdata[19] = n;
     
-    /* Update work stealing statistics */
-    if (mining_state.steal_counter > 0) {
-        applog(LOG_DEBUG, "Thread %d stole work %d times, processed %d stolen nonces",
-               thr_id, mining_state.steal_counter, stolen_processed);
-    }
-    
-    /* Update skipping statistics */
+    /* Update skipping statistics (internal only, no output) */
     if (attempts > 0) {
         float skip_rate = (float)skipped / attempts * 100.0f;
         if (skip_rate > 50.0f) {
@@ -682,4 +676,4 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     }
     
     return found;
-}
+        }
