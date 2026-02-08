@@ -155,7 +155,7 @@ FORCE_INLINE void update_work_pool(uint32_t start_nonce, uint32_t end_nonce) {
     }
 }
 
-/* Inline helper for early comparison rejection */
+/* Inline helper for early comparison rejection - IDENTICAL TO ORIGINAL */
 FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
     return hash7 <= Htarg;
 }
@@ -362,7 +362,7 @@ FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *tar
 }
 #endif
 
-/* Optimized computation with enhanced prediction */
+/* Optimized computation with enhanced prediction - IDENTICAL HASH OUTPUT */
 FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint32_t nonce) {
     static const yespower_params_t params = {
         .version = YESPOWER_1_0,
@@ -386,13 +386,13 @@ FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint
                 /* Skip if pattern suggests high hash value */
                 if ((last_hash_val & 0xFF000000) == 0xFF000000) {
                     mining_state.pattern_matches++;
-                    return yespower_tls(data, 80, &params, hash);
+                    /* Still compute the hash - just track statistics */
                 }
             }
         }
     }
     
-    /* Compute actual hash */
+    /* Compute actual hash - EXACTLY AS ORIGINAL */
     int result = yespower_tls(data, 80, &params, hash);
     
     if (result == 0) {
@@ -441,21 +441,13 @@ FORCE_INLINE void arm_prefetch(const void *addr) {
 #endif
 }
 
-/* Fast nonce encoding with ARM optimization - IDENTICAL TO ORIGINAL */
+/* Fast nonce encoding - IDENTICAL TO ORIGINAL */
 FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
     /* Big-endian encoding - EXACTLY AS ORIGINAL */
     data32[19] = (nonce >> 24) | 
                  ((nonce >> 8) & 0xFF00) |
                  ((nonce << 8) & 0xFF0000) |
                  (nonce << 24);
-}
-
-/* Fixed convert_hash function - IDENTICAL TO ORIGINAL */
-FORCE_INLINE void convert_hash(uint32_t *dest, const uint32_t *src, int count) {
-    /* Use same byte swapping as original - le32dec() */
-    for (int i = 0; i < count; i++) {
-        dest[i] = le32dec(&src[i]);
-    }
 }
 
 /* Main scanning function with all optimizations - IDENTICAL HASH OUTPUT */
@@ -482,28 +474,24 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     /* Update work stealing pool */
     update_work_pool(pdata[19], max_nonce);
     
-    /* Cache-aligned data structures */
+    /* Cache-aligned data structures - MATCHES ORIGINAL EXACTLY */
     union {
-        uint8_t u8[80];
+        uint8_t u8[80];      /* FIXED: 80 bytes as in original */
         uint32_t u32[20];
-        uint64_t u64[10];
     } CACHE_ALIGN data;
     
     union {
         yespower_binary_t yb;
-        uint32_t u32[8];
-        uint64_t u64[4];
+        uint32_t u32[8];     /* FIXED: 8 words for 32-byte hash */
     } CACHE_ALIGN hash;
     
-    /* Keep hot data */
-    uint32_t n = pdata[19];
+    /* Keep hot data - MATCHES ORIGINAL EXACTLY */
+    uint32_t n = pdata[19] - 1;  /* EXACTLY AS ORIGINAL: start at pdata[19] - 1 */
     const uint32_t Htarg = ptarget[7];
     uint32_t local_max_nonce = max_nonce;
     const uint32_t *local_ptarget = ptarget;
     uint32_t *local_pdata = pdata;
     
-    /* Local copies */
-    uint32_t temp_hash[8] CACHE_ALIGN;
     int found = 0;
     uint32_t attempts = 0;
     uint32_t skipped = 0;
@@ -519,43 +507,55 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     arm_prefetch(data.u8);
     
     /* Aggressive work stealing configuration */
-    uint32_t restart_check_interval = 128; /* More frequent checks */
-    uint32_t batch_size = 256;  /* Larger batch for Cortex-A53/A72 */
+    uint32_t restart_check_interval = 128;
+    uint32_t batch_size = 256;
     uint32_t steal_check_counter = 0;
     
-    while (n < local_max_nonce && !found) {
+    do {
         /* Try to steal work (50% chance) */
         if (++steal_check_counter >= 32) {
             steal_check_counter = 0;
-            uint32_t current_n = n;  /* Create a local copy for address passing */
+            uint32_t current_n = n;
             if (try_steal_work(thr_id, &current_n, local_max_nonce)) {
                 /* Process stolen work first */
                 while (mining_state.steal_index < mining_state.steal_count && !found) {
                     uint32_t stolen_nonce = mining_state.stolen_work[mining_state.steal_index++];
                     stolen_processed++;
                     
-                    /* Process stolen nonce - EXACTLY SAME HASH COMPUTATION AS ORIGINAL */
+                    /* Process stolen nonce - EXACTLY SAME AS ORIGINAL */
                     encode_nonce(data.u32, stolen_nonce);
                     
-                    if (compute_hash(data.u8, &hash.yb, stolen_nonce)) {
+                    /* Compute hash - EXACTLY SAME AS ORIGINAL */
+                    static const yespower_params_t params = {
+                        .version = YESPOWER_1_0,
+                        .N = 4096,
+                        .r = 16,
+                        .pers = NULL,
+                        .perslen = 0
+                    };
+                    
+                    if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
                         abort();
                     }
                     
-                    /* Check hash - EXACTLY SAME CHECK LOGIC AS ORIGINAL */
-                    uint32_t hash7 = le32dec(&hash.u32[7]);
-                    if (early_reject(hash7, Htarg)) {
-                        convert_hash(temp_hash, hash.u32, 7);
+                    /* Check hash - EXACTLY SAME AS ORIGINAL */
+                    if (le32dec(&hash.u32[7]) <= Htarg) {
+                        /* Convert first 7 words - EXACTLY AS ORIGINAL */
+                        uint32_t temp_hash[7];
+                        for (int i = 0; i < 7; i++) {
+                            temp_hash[i] = le32dec(&hash.u32[i]);
+                        }
                         
                         /* Final validation with original fulltest - GUARANTEES IDENTICAL RESULT */
                         if (fulltest(temp_hash, local_ptarget)) {
                             found = 1;
-                            n = stolen_nonce + 1;
+                            n = stolen_nonce;
                             break;
                         }
                     }
-                } /* End while loop for stolen work */
-            } /* End if try_steal_work */
-        } /* End if steal_check_counter */
+                }
+            }
+        }
         
         /* Process regular work */
         uint32_t batch_end = n + batch_size;
@@ -576,14 +576,25 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
             encode_nonce(data.u32, n);
             
             /* Compute hash - EXACTLY AS ORIGINAL */
-            if (compute_hash(data.u8, &hash.yb, n)) {
+            static const yespower_params_t params = {
+                .version = YESPOWER_1_0,
+                .N = 4096,
+                .r = 16,
+                .pers = NULL,
+                .perslen = 0
+            };
+            
+            if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
                 abort();
             }
             
             /* Early reject - EXACTLY SAME LOGIC AS ORIGINAL */
-            uint32_t hash7 = le32dec(&hash.u32[7]);
-            if (early_reject(hash7, Htarg)) {
-                convert_hash(temp_hash, hash.u32, 7);
+            if (le32dec(&hash.u32[7]) <= Htarg) {
+                /* Convert first 7 words - EXACTLY AS ORIGINAL */
+                uint32_t temp_hash[7];
+                for (int i = 0; i < 7; i++) {
+                    temp_hash[i] = le32dec(&hash.u32[i]);
+                }
                 
                 /* Final validation with original fulltest - GUARANTEES IDENTICAL RESULT */
                 if (fulltest(temp_hash, local_ptarget)) {
@@ -596,24 +607,20 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
             if ((n & 0x7F) == 0 && should_restart(thr_id, restart_check_interval)) {
                 break;
             }
-        } /* End for loop for regular work */
-        
-        /* Aggressive work stealing at batch boundaries */
-        if (should_restart(thr_id, 1)) {
-            break;
         }
         
         /* Adaptive batch sizing */
         if (batch_size < 2048 && (n & 0x7FF) == 0) {
-            batch_size = (batch_size * 3) / 2; /* Increase by 50% */
+            batch_size = (batch_size * 3) / 2;
         }
-    } /* End while loop */
+        
+    } while (n < local_max_nonce && !found && !work_restart[thr_id].restart);
     
     /* Update results - MATCHES ORIGINAL FORMAT EXACTLY */
-    *hashes_done = (n - pdata[19]) + stolen_processed + 1;
+    *hashes_done = n - pdata[19] + 1;
     pdata[19] = n;
     
-    /* Update skipping statistics (internal only, no output) */
+    /* Update skipping statistics (internal only) */
     if (attempts > 0) {
         float skip_rate = (float)skipped / attempts * 100.0f;
         if (skip_rate > 50.0f) {
