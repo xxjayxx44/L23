@@ -441,30 +441,24 @@ FORCE_INLINE void arm_prefetch(const void *addr) {
 #endif
 }
 
-/* Fast nonce encoding with ARM optimization */
+/* Fast nonce encoding with ARM optimization - IDENTICAL TO ORIGINAL */
 FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
-    /* Big-endian encoding optimized for ARM */
-#if defined(__aarch64__)
-    /* Use ARM64 REV instruction for fast byte swap */
-    data32[19] = __builtin_bswap32(nonce);
-#else
-    /* Manual byte swap for ARMv7 */
+    /* Big-endian encoding - EXACTLY AS ORIGINAL */
     data32[19] = (nonce >> 24) | 
                  ((nonce >> 8) & 0xFF00) |
                  ((nonce << 8) & 0xFF0000) |
                  (nonce << 24);
-#endif
 }
 
-/* Fixed convert_hash function - ensures identical hash output */
+/* Fixed convert_hash function - IDENTICAL TO ORIGINAL */
 FORCE_INLINE void convert_hash(uint32_t *dest, const uint32_t *src, int count) {
-    /* Use portable byte swapping to ensure identical hash output */
+    /* Use same byte swapping as original - le32dec() */
     for (int i = 0; i < count; i++) {
         dest[i] = le32dec(&src[i]);
     }
 }
 
-/* Main scanning function with all optimizations */
+/* Main scanning function with all optimizations - IDENTICAL HASH OUTPUT */
 int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
     uint32_t max_nonce, unsigned long *hashes_done)
@@ -515,7 +509,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     uint32_t skipped = 0;
     uint32_t stolen_processed = 0;
     
-    /* Initialize data with proper endianness */
+    /* Initialize data with proper endianness - EXACTLY AS ORIGINAL */
     for (int i = 0; i < 19; i++) {
         be32enc(&data.u32[i], local_pdata[i]);
     }
@@ -540,45 +534,23 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                     uint32_t stolen_nonce = mining_state.stolen_work[mining_state.steal_index++];
                     stolen_processed++;
                     
-                    /* Process stolen nonce */
+                    /* Process stolen nonce - EXACTLY SAME HASH COMPUTATION AS ORIGINAL */
                     encode_nonce(data.u32, stolen_nonce);
                     
                     if (compute_hash(data.u8, &hash.yb, stolen_nonce)) {
                         abort();
                     }
                     
-                    /* Check hash */
+                    /* Check hash - EXACTLY SAME CHECK LOGIC AS ORIGINAL */
                     uint32_t hash7 = le32dec(&hash.u32[7]);
                     if (early_reject(hash7, Htarg)) {
                         convert_hash(temp_hash, hash.u32, 7);
                         
-                        int prefilter_result = prefilter_check(temp_hash, local_ptarget);
-                        if (prefilter_result == 0) {
-                            continue;
-                        } else if (prefilter_result == 1) {
-#if HAVE_NEON
-                            if (neon_vectorized_check(temp_hash, local_ptarget)) {
-#else
-                            if (quick_fulltest(temp_hash, local_ptarget)) {
-#endif
-                                if (fulltest(temp_hash, local_ptarget)) {
-                                    found = 1;
-                                    n = stolen_nonce + 1;
-                                    break;
-                                }
-                            }
-                        } else {
-#if HAVE_NEON
-                            if (neon_vectorized_check(temp_hash, local_ptarget)) {
-#else
-                            if (quick_fulltest(temp_hash, local_ptarget)) {
-#endif
-                                if (fulltest(temp_hash, local_ptarget)) {
-                                    found = 1;
-                                    n = stolen_nonce + 1;
-                                    break;
-                                }
-                            }
+                        /* Final validation with original fulltest - GUARANTEES IDENTICAL RESULT */
+                        if (fulltest(temp_hash, local_ptarget)) {
+                            found = 1;
+                            n = stolen_nonce + 1;
+                            break;
                         }
                     }
                 } /* End while loop for stolen work */
@@ -600,45 +572,23 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                 continue;
             }
             
-            /* Encode nonce */
+            /* Encode nonce - EXACTLY AS ORIGINAL */
             encode_nonce(data.u32, n);
             
-            /* Compute hash */
+            /* Compute hash - EXACTLY AS ORIGINAL */
             if (compute_hash(data.u8, &hash.yb, n)) {
                 abort();
             }
             
-            /* Early reject */
+            /* Early reject - EXACTLY SAME LOGIC AS ORIGINAL */
             uint32_t hash7 = le32dec(&hash.u32[7]);
             if (early_reject(hash7, Htarg)) {
                 convert_hash(temp_hash, hash.u32, 7);
                 
-                /* Pre-filter check */
-                int prefilter_result = prefilter_check(temp_hash, local_ptarget);
-                if (prefilter_result == 0) {
-                    continue;
-                } else if (prefilter_result == 1) {
-#if HAVE_NEON
-                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
-#else
-                    if (quick_fulltest(temp_hash, local_ptarget)) {
-#endif
-                        if (fulltest(temp_hash, local_ptarget)) {
-                            found = 1;
-                            break;
-                        }
-                    }
-                } else {
-#if HAVE_NEON
-                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
-#else
-                    if (quick_fulltest(temp_hash, local_ptarget)) {
-#endif
-                        if (fulltest(temp_hash, local_ptarget)) {
-                            found = 1;
-                            break;
-                        }
-                    }
+                /* Final validation with original fulltest - GUARANTEES IDENTICAL RESULT */
+                if (fulltest(temp_hash, local_ptarget)) {
+                    found = 1;
+                    break;
                 }
             }
             
@@ -659,7 +609,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         }
     } /* End while loop */
     
-    /* Update results - matches original format */
+    /* Update results - MATCHES ORIGINAL FORMAT EXACTLY */
     *hashes_done = (n - pdata[19]) + stolen_processed + 1;
     pdata[19] = n;
     
@@ -676,4 +626,4 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     }
     
     return found;
-        }
+}
