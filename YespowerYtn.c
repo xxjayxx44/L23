@@ -13,6 +13,11 @@
 #include <time.h>
 #include <math.h>
 
+/* Get CPU count from system configuration */
+#ifndef MAX_CPUS
+#define MAX_CPUS 256  /* Fallback definition */
+#endif
+
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
 #define HAVE_NEON 1
@@ -25,6 +30,33 @@
 #include <smmintrin.h>
 #define HAVE_SSE4 1
 #define VECTOR_WIDTH 4
+#endif
+
+/* Cycle counter for various architectures */
+#if defined(__x86_64__) || defined(__i386__)
+static inline uint64_t cycle_counter(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+#elif defined(__aarch64__)
+static inline uint64_t cycle_counter(void) {
+    uint64_t val;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+}
+#elif defined(__arm__)
+static inline uint64_t cycle_counter(void) {
+    uint32_t val;
+    __asm__ __volatile__("mrc p15, 0, %0, c9, c13, 0" : "=r"(val));
+    return val;
+}
+#else
+static inline uint64_t cycle_counter(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 #endif
 
 /* Ultra-Aggressive Work Stealing Configuration */
@@ -88,6 +120,12 @@ typedef struct CACHE_ALIGN {
 } global_work_pool_t;
 
 static global_work_pool_t global_pool CACHE_ALIGN;
+
+/* Forward declarations for work stealing functions */
+FORCE_INLINE int steal_random(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce);
+FORCE_INLINE int steal_predictive(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce);
+FORCE_INLINE int steal_cooperative(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce);
+FORCE_INLINE int steal_adaptive(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce);
 
 /* Thread State with Advanced Features */
 typedef struct CACHE_ALIGN {
@@ -222,6 +260,11 @@ FORCE_INLINE void adaptive_spin_unlock(volatile uint32_t *lock) {
     *lock = 0;
 }
 
+/* Trylock version for spinlock */
+FORCE_INLINE int adaptive_spin_trylock(volatile uint32_t *lock) {
+    return atomic_cas(lock, 0, 1) == 0;
+}
+
 /* Thread performance monitoring and load balancing */
 FORCE_INLINE void update_thread_performance(int thr_id, uint32_t hashes, uint32_t nonce) {
     uint32_t current_time = (uint32_t)time(NULL);
@@ -301,21 +344,6 @@ FORCE_INLINE int donate_work(int thr_id, uint32_t start_nonce, uint32_t end_nonc
     
     uint32_t donate_start = start_nonce;
     
-    /* Find slowest thread to donate to */
-    int slowest_thread = -1;
-    uint32_t slowest_rate = UINT32_MAX;
-    
-    for (int i = 0; i < MAX_CPUS; i++) {
-        if (i != thr_id && global_pool.thread_hash_rates[i] > 0) {
-            if (global_pool.thread_hash_rates[i] < slowest_rate) {
-                slowest_rate = global_pool.thread_hash_rates[i];
-                slowest_thread = i;
-            }
-        }
-    }
-    
-    if (slowest_thread == -1) return 0;
-    
     /* Actually, we'll just put in global pool for now */
     adaptive_spin_lock(&global_pool.spinlock);
     
@@ -331,72 +359,6 @@ FORCE_INLINE int donate_work(int thr_id, uint32_t start_nonce, uint32_t end_nonc
     tls_state.stealing.consecutive_donations++;
     
     return donation_size;
-}
-
-/* Intelligent work stealing with multiple strategies */
-FORCE_INLINE int intelligent_steal_work(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce) {
-    uint32_t start_time = __builtin_ia32_rdtsc();
-    
-    /* Adaptive stealing probability based on load */
-    float steal_prob = WORK_STEAL_PROBABILITY;
-    
-    if (needs_help(thr_id)) {
-        steal_prob *= 2.0f;  /* Double stealing probability if we need help */
-    } else if (can_help_others(thr_id)) {
-        steal_prob *= 0.5f;  /* Halve stealing probability if we can help */
-    }
-    
-    /* Apply adaptive probability */
-    if ((rand() / (float)RAND_MAX) > steal_prob) {
-        tls_state.perf.idle_cycles += (__builtin_ia32_rdtsc() - start_time);
-        return 0;
-    }
-    
-    int stolen = 0;
-    uint32_t work_size = 0;
-    
-    /* Try different stealing strategies based on mode */
-    switch (global_pool.current_mode) {
-        case WS_MODE_RANDOM:
-            stolen = steal_random(thr_id, nonce_ptr, max_nonce);
-            break;
-        case WS_MODE_PREDICTIVE:
-            stolen = steal_predictive(thr_id, nonce_ptr, max_nonce);
-            break;
-        case WS_MODE_COOPERATIVE:
-            stolen = steal_cooperative(thr_id, nonce_ptr, max_nonce);
-            break;
-        case WS_MODE_ADAPTIVE:
-        default:
-            stolen = steal_adaptive(thr_id, nonce_ptr, max_nonce);
-            break;
-    }
-    
-    uint32_t end_time = __builtin_ia32_rdtsc();
-    uint32_t latency = end_time - start_time;
-    
-    /* Update latency statistics */
-    tls_state.stealing.steal_latency[tls_state.stealing.latency_index++ % 64] = latency;
-    
-    if (stolen) {
-        tls_state.stealing.steal_success++;
-        tls_state.stealing.consecutive_steals++;
-        tls_state.stealing.consecutive_donations = 0;
-        global_pool.total_stolen += work_size;
-    } else {
-        tls_state.perf.idle_cycles += latency;
-    }
-    
-    tls_state.stealing.steal_attempts++;
-    
-    /* Update average latency */
-    uint32_t sum = 0;
-    for (int i = 0; i < 64; i++) {
-        sum += tls_state.stealing.steal_latency[i];
-    }
-    tls_state.stealing.avg_steal_latency = sum / 64.0f;
-    
-    return stolen;
 }
 
 /* Random work stealing - baseline strategy */
@@ -494,9 +456,6 @@ FORCE_INLINE int steal_cooperative(int thr_id, uint32_t *nonce_ptr, uint32_t max
             *nonce_ptr += help_size;
             
             /* Store as donated work for the helper */
-            // In a real implementation, we'd communicate this to the other thread
-            // For now, we just process it ourselves as if helping
-            
             tls_state.stealing.last_help_nonce = help_start;
             return 1;
         }
@@ -508,9 +467,9 @@ FORCE_INLINE int steal_cooperative(int thr_id, uint32_t *nonce_ptr, uint32_t max
 
 /* Adaptive work stealing - chooses best strategy */
 FORCE_INLINE int steal_adaptive(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce) {
-    static int strategy_weights[4] = {25, 25, 25, 25};  /* Initial weights */
-    static uint32_t strategy_success[4] = {0, 0, 0, 0};
-    static uint32_t strategy_attempts[4] = {0, 0, 0, 0};
+    static __thread int strategy_weights[4] = {25, 25, 25, 25};  /* Initial weights */
+    static __thread uint32_t strategy_success[4] = {0, 0, 0, 0};
+    static __thread uint32_t strategy_attempts[4] = {0, 0, 0, 0};
     
     /* Choose strategy based on weighted random */
     int total_weight = 0;
@@ -527,7 +486,7 @@ FORCE_INLINE int steal_adaptive(int thr_id, uint32_t *nonce_ptr, uint32_t max_no
     }
     
     int result = 0;
-    uint32_t start_time = __builtin_ia32_rdtsc();
+    uint64_t start_time = cycle_counter();
     
     switch (chosen_strategy) {
         case 0: result = steal_random(thr_id, nonce_ptr, max_nonce); break;
@@ -536,8 +495,8 @@ FORCE_INLINE int steal_adaptive(int thr_id, uint32_t *nonce_ptr, uint32_t max_no
         default: result = steal_random(thr_id, nonce_ptr, max_nonce); break;
     }
     
-    uint32_t end_time = __builtin_ia32_rdtsc();
-    uint32_t latency = end_time - start_time;
+    uint64_t end_time = cycle_counter();
+    uint64_t latency = end_time - start_time;
     
     strategy_attempts[chosen_strategy]++;
     if (result) strategy_success[chosen_strategy]++;
@@ -560,7 +519,78 @@ FORCE_INLINE int steal_adaptive(int thr_id, uint32_t *nonce_ptr, uint32_t max_no
         }
     }
     
+    /* Use latency for performance tracking */
+    if (result) {
+        tls_state.stealing.steal_latency[tls_state.stealing.latency_index++ % 64] = (uint32_t)latency;
+    }
+    
     return result;
+}
+
+/* Intelligent work stealing with multiple strategies */
+FORCE_INLINE int intelligent_steal_work(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce) {
+    uint64_t start_time = cycle_counter();
+    
+    /* Adaptive stealing probability based on load */
+    float steal_prob = WORK_STEAL_PROBABILITY;
+    
+    if (needs_help(thr_id)) {
+        steal_prob *= 2.0f;  /* Double stealing probability if we need help */
+    } else if (can_help_others(thr_id)) {
+        steal_prob *= 0.5f;  /* Halve stealing probability if we can help */
+    }
+    
+    /* Apply adaptive probability */
+    if ((rand() / (float)RAND_MAX) > steal_prob) {
+        tls_state.perf.idle_cycles += (cycle_counter() - start_time);
+        return 0;
+    }
+    
+    int stolen = 0;
+    uint32_t work_size = 0;
+    
+    /* Try different stealing strategies based on mode */
+    switch (global_pool.current_mode) {
+        case WS_MODE_RANDOM:
+            stolen = steal_random(thr_id, nonce_ptr, max_nonce);
+            break;
+        case WS_MODE_PREDICTIVE:
+            stolen = steal_predictive(thr_id, nonce_ptr, max_nonce);
+            break;
+        case WS_MODE_COOPERATIVE:
+            stolen = steal_cooperative(thr_id, nonce_ptr, max_nonce);
+            break;
+        case WS_MODE_ADAPTIVE:
+        default:
+            stolen = steal_adaptive(thr_id, nonce_ptr, max_nonce);
+            break;
+    }
+    
+    uint64_t end_time = cycle_counter();
+    uint64_t latency = end_time - start_time;
+    
+    /* Update latency statistics */
+    tls_state.stealing.steal_latency[tls_state.stealing.latency_index++ % 64] = (uint32_t)latency;
+    
+    if (stolen) {
+        tls_state.stealing.steal_success++;
+        tls_state.stealing.consecutive_steals++;
+        tls_state.stealing.consecutive_donations = 0;
+        global_pool.total_stolen += work_size;
+    } else {
+        tls_state.perf.idle_cycles += latency;
+    }
+    
+    tls_state.stealing.steal_attempts++;
+    
+    /* Update average latency */
+    uint64_t sum = 0;
+    for (int i = 0; i < 64; i++) {
+        sum += tls_state.stealing.steal_latency[i];
+    }
+    tls_state.stealing.avg_steal_latency = (float)sum / 64.0f;
+    
+    return stolen;
 }
 
 /* Update global work pool with advanced features */
@@ -593,8 +623,15 @@ FORCE_INLINE void update_global_work_pool(uint32_t start_nonce, uint32_t end_non
     
     adaptive_spin_unlock(&global_pool.spinlock);
 }
+/* Union for hash batch processing */
+typedef union {
+    yespower_binary_t yb;
+    uint8_t u8[32];
+    uint32_t u32[8];
+} hash_batch_union_t;
+
 /* Advanced batch hash computation with SIMD optimization */
-FORCE_INLINE HOT int compute_hash_batch(const uint8_t *data, yespower_binary_t *hashes, 
+FORCE_INLINE HOT int compute_hash_batch(const uint8_t *data, hash_batch_union_t *hashes, 
                                        uint32_t *nonces, uint32_t batch_size) {
     static const yespower_params_t params = {
         .version = YESPOWER_1_0,
@@ -613,7 +650,7 @@ FORCE_INLINE HOT int compute_hash_batch(const uint8_t *data, yespower_binary_t *
         memcpy(temp_data, data, 80);
         be32enc(temp_data + 76, nonces[i]);  /* Proper endian encoding */
         
-        if (yespower_tls(temp_data, 80, &params, &hashes[i])) {
+        if (yespower_tls(temp_data, 80, &params, &hashes[i].yb)) {
             continue;  /* Skip failed computations */
         }
         
@@ -663,18 +700,18 @@ FORCE_INLINE HOT int neon_check_batch(const uint32_t (*hashes)[8], const uint32_
         /* Extract comparison results */
         uint64_t lt_mask0 = vgetq_lane_u64(vreinterpretq_u64_u32(cmp_lt0), 0) |
                            vgetq_lane_u64(vreinterpretq_u64_u32(cmp_lt0), 1);
-        uint64_t eq_mask0 = vgetq_lane_u64(vreinterpretq_u64_u32(cmp_eq0), 0) &
-                           vgetq_lane_u64(vreinterpretq_u64_u32(cmp_eq0), 1);
         
         uint64_t lt_mask1 = vgetq_lane_u64(vreinterpretq_u64_u32(cmp_lt1), 0) |
                            vgetq_lane_u64(vreinterpretq_u64_u32(cmp_lt1), 1);
-        uint64_t eq_mask1 = vgetq_lane_u64(vreinterpretq_u64_u32(cmp_eq1), 0) &
-                           vgetq_lane_u64(vreinterpretq_u64_u32(cmp_eq1), 1);
         
         /* If any hash < target, we found a candidate */
         if ((lt_mask0 | lt_mask1) != 0) {
             /* Need proper ordering check */
-            if (fulltest(hashes[i], target)) {
+            uint32_t temp_hash[7];
+            for (int j = 0; j < 7; j++) {
+                temp_hash[j] = hashes[i][j];
+            }
+            if (fulltest(temp_hash, target)) {
                 return i;
             }
         }
@@ -693,7 +730,7 @@ int HOT scanhash_ytn_yespower_enhanced(int thr_id, uint32_t *pdata,
     static int initialized = 0;
     if (!initialized) {
         init_enhanced_work_stealing();
-        srand(time(NULL) ^ (thr_id << 16) ^ __builtin_ia32_rdtsc());
+        srand(time(NULL) ^ (thr_id << 16) ^ (uint32_t)cycle_counter());
         initialized = 1;
     }
     
@@ -722,10 +759,7 @@ int HOT scanhash_ytn_yespower_enhanced(int thr_id, uint32_t *pdata,
         uint32_t u32[20];
     } CACHE_ALIGN data;
     
-    union {
-        yespower_binary_t yb;
-        uint32_t u32[8];
-    } CACHE_ALIGN hash_batch[VECTOR_WIDTH];
+    hash_batch_union_t hash_batch[VECTOR_WIDTH] CACHE_ALIGN;
     
     /* Initialize data */
     for (int i = 0; i < 19; i++) {
@@ -739,7 +773,7 @@ int HOT scanhash_ytn_yespower_enhanced(int thr_id, uint32_t *pdata,
     uint32_t batch_size = VECTOR_WIDTH;
     
     /* Performance monitoring start */
-    uint64_t start_cycles = __builtin_ia32_rdtsc();
+    uint64_t start_cycles = cycle_counter();
     
     do {
         uint32_t batch_nonces[VECTOR_WIDTH];
@@ -792,7 +826,7 @@ int HOT scanhash_ytn_yespower_enhanced(int thr_id, uint32_t *pdata,
         /* Check batch for solutions */
         for (uint32_t i = 0; i < valid_batch; i++) {
             /* Quick early rejection */
-            if (hash_batch[i].u32[7] > Htarg) continue;
+            if (le32dec(&hash_batch[i].u32[7]) > Htarg) continue;
             
             /* Full test */
             uint32_t temp_hash[7];
@@ -863,7 +897,7 @@ int HOT scanhash_ytn_yespower_enhanced(int thr_id, uint32_t *pdata,
     
 done:
     /* Update performance counters */
-    uint64_t end_cycles = __builtin_ia32_rdtsc();
+    uint64_t end_cycles = cycle_counter();
     tls_state.perf.compute_cycles += (end_cycles - start_cycles);
     tls_state.perf.hashes_computed += attempts;
     
@@ -882,4 +916,13 @@ done:
     }
     
     return found;
+}
+
+/* Main scanning function - wrapper for compatibility */
+int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
+    const uint32_t *ptarget,
+    uint32_t max_nonce, unsigned long *hashes_done)
+{
+    /* Call the enhanced version */
+    return scanhash_ytn_yespower_enhanced(thr_id, pdata, ptarget, max_nonce, hashes_done);
 }
