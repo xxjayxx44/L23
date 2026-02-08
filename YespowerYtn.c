@@ -411,7 +411,6 @@ FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint
     
     return result;
 }
-
 /* Enhanced work stealing aware restart check */
 FORCE_INLINE int should_restart(int thr_id, uint32_t check_interval) {
     static __thread uint32_t check_counter = 0;
@@ -548,4 +547,139 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                         abort();
                     }
                     
+                    /* Check hash */
+                    uint32_t hash7 = le32dec(&hash.u32[7]);
+                    if (early_reject(hash7, Htarg)) {
+                        convert_hash(temp_hash, hash.u32, 7);
+                        
+                        int prefilter_result = prefilter_check(temp_hash, local_ptarget);
+                        if (prefilter_result == 0) {
+                            continue;
+                        } else if (prefilter_result == 1) {
+#if HAVE_NEON
+                            if (neon_vectorized_check(temp_hash, local_ptarget)) {
+#else
+                            if (quick_fulltest(temp_hash, local_ptarget)) {
+#endif
+                                if (fulltest(temp_hash, local_ptarget)) {
+                                    found = 1;
+                                    n = stolen_nonce + 1;
+                                    break;
+                                }
+                            }
+                        } else {
+#if HAVE_NEON
+                            if (neon_vectorized_check(temp_hash, local_ptarget)) {
+#else
+                            if (quick_fulltest(temp_hash, local_ptarget)) {
+#endif
+                                if (fulltest(temp_hash, local_ptarget)) {
+                                    found = 1;
+                                    n = stolen_nonce + 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } /* End while loop for stolen work */
+            } /* End if try_steal_work */
+        } /* End if steal_check_counter */
+        
+        /* Process regular work */
+        uint32_t batch_end = n + batch_size;
+        if (batch_end > local_max_nonce) {
+            batch_end = local_max_nonce;
+        }
+        
+        for (; n < batch_end && !found; n++) {
+            attempts++;
+            
+            /* Enhanced predictive skipping */
+            if (should_skip_nonce(n, data.u8)) {
+                skipped++;
+                continue;
+            }
+            
+            /* Encode nonce */
+            encode_nonce(data.u32, n);
+            
+            /* Compute hash */
+            if (compute_hash(data.u8, &hash.yb, n)) {
+                abort();
+            }
+            
+            /* Early reject */
+            uint32_t hash7 = le32dec(&hash.u32[7]);
+            if (early_reject(hash7, Htarg)) {
+                convert_hash(temp_hash, hash.u32, 7);
                 
+                /* Pre-filter check */
+                int prefilter_result = prefilter_check(temp_hash, local_ptarget);
+                if (prefilter_result == 0) {
+                    continue;
+                } else if (prefilter_result == 1) {
+#if HAVE_NEON
+                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
+#else
+                    if (quick_fulltest(temp_hash, local_ptarget)) {
+#endif
+                        if (fulltest(temp_hash, local_ptarget)) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                } else {
+#if HAVE_NEON
+                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
+#else
+                    if (quick_fulltest(temp_hash, local_ptarget)) {
+#endif
+                        if (fulltest(temp_hash, local_ptarget)) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            /* Aggressive restart checking with work stealing */
+            if ((n & 0x7F) == 0 && should_restart(thr_id, restart_check_interval)) {
+                break;
+            }
+        } /* End for loop for regular work */
+        
+        /* Aggressive work stealing at batch boundaries */
+        if (should_restart(thr_id, 1)) {
+            break;
+        }
+        
+        /* Adaptive batch sizing */
+        if (batch_size < 2048 && (n & 0x7FF) == 0) {
+            batch_size = (batch_size * 3) / 2; /* Increase by 50% */
+        }
+    } /* End while loop */
+    
+    /* Update results */
+    *hashes_done = (n - pdata[19]) + stolen_processed;
+    pdata[19] = n;
+    
+    /* Update work stealing statistics */
+    if (mining_state.steal_counter > 0) {
+        applog(LOG_DEBUG, "Thread %d stole work %d times, processed %d stolen nonces",
+               thr_id, mining_state.steal_counter, stolen_processed);
+    }
+    
+    /* Update skipping statistics */
+    if (attempts > 0) {
+        float skip_rate = (float)skipped / attempts * 100.0f;
+        if (skip_rate > 50.0f) {
+            float new_prob = mining_state.skip_probability + 0.05f;
+            mining_state.skip_probability = new_prob < 0.8f ? new_prob : 0.8f;
+        } else {
+            float new_prob = mining_state.skip_probability - 0.02f;
+            mining_state.skip_probability = new_prob > 0.1f ? new_prob : 0.1f;
+        }
+    }
+    
+    return found;
+}
