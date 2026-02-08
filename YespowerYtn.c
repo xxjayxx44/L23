@@ -35,6 +35,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <math.h>
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>  /* For ARM NEON intrinsics */
@@ -155,7 +156,7 @@ FORCE_INLINE void update_work_pool(uint32_t start_nonce, uint32_t end_nonce) {
 }
 
 /* Inline helper for early comparison rejection */
-FORCE_INLINE int early_reject(register uint32_t hash7, register uint32_t Htarg) {
+FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
     return hash7 <= Htarg;
 }
 
@@ -173,7 +174,7 @@ FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
     }
     
     /* Pattern-based skipping */
-    register uint32_t pattern_check = nonce ^ data[0] ^ data[4] ^ data[8];
+    uint32_t pattern_check = nonce ^ data[0] ^ data[4] ^ data[8];
     
     /* Unrolled loop for better performance */
     if ((pattern_check & SKIP_PATTERNS[0]) == SKIP_PATTERNS[0]) return 1;
@@ -253,13 +254,13 @@ FORCE_INLINE int prefilter_check(const uint32_t *hash, const uint32_t *target) {
 /* Unrolled comparison logic with register optimization */
 FORCE_INLINE int quick_fulltest(const uint32_t *hash, const uint32_t *ptarget) {
     /* Keep target values in registers */
-    register uint32_t t6 = ptarget[6];
-    register uint32_t t5 = ptarget[5];
-    register uint32_t t4 = ptarget[4];
-    register uint32_t t3 = ptarget[3];
-    register uint32_t t2 = ptarget[2];
-    register uint32_t t1 = ptarget[1];
-    register uint32_t t0 = ptarget[0];
+    uint32_t t6 = ptarget[6];
+    uint32_t t5 = ptarget[5];
+    uint32_t t4 = ptarget[4];
+    uint32_t t3 = ptarget[3];
+    uint32_t t2 = ptarget[2];
+    uint32_t t1 = ptarget[1];
+    uint32_t t0 = ptarget[0];
     
     /* Check highest words first for early rejection */
     if (hash[6] > t6) return 0;
@@ -290,8 +291,22 @@ FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *tar
     uint32x4_t hash_vec1 = vld1q_u32(hash);      /* hash[0..3] */
     uint32x4_t target_vec1 = vld1q_u32(target);  /* target[0..3] */
     
-    uint32x4_t hash_vec2 = vld1q_u32(hash + 4);  /* hash[4..7] */
-    uint32x4_t target_vec2 = vld1q_u32(target + 4); /* target[4..7] */
+    uint32_t hash_tail[4];
+    uint32_t target_tail[4];
+    
+    /* Load remaining 3 words (hash[4..6]) and pad with 0 for the 4th element */
+    hash_tail[0] = hash[4];
+    hash_tail[1] = hash[5];
+    hash_tail[2] = hash[6];
+    hash_tail[3] = 0;
+    
+    target_tail[0] = target[4];
+    target_tail[1] = target[5];
+    target_tail[2] = target[6];
+    target_tail[3] = 0;
+    
+    uint32x4_t hash_vec2 = vld1q_u32(hash_tail);  /* hash[4..6] + padding */
+    uint32x4_t target_vec2 = vld1q_u32(target_tail); /* target[4..6] + padding */
     
     /* Compare hash < target */
     uint32x4_t cmp_lt1 = vcltq_u32(hash_vec1, target_vec1);
@@ -359,7 +374,7 @@ FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint
     
     /* Enhanced prediction using hash history */
     if (mining_state.state_valid && mining_state.precomputed) {
-        register uint32_t nonce_diff = nonce - mining_state.last_nonce;
+        uint32_t nonce_diff = nonce - mining_state.last_nonce;
         
         /* Small nonce differences often produce similar hash patterns */
         if (nonce_diff < 128) {
@@ -442,25 +457,12 @@ FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
 #endif
 }
 
-/* Fast hash conversion with NEON optimization */
+/* Fixed convert_hash function - removes NEON issue and ensures identical hash output */
 FORCE_INLINE void convert_hash(uint32_t *dest, const uint32_t *src, int count) {
-#if HAVE_NEON && __ARM_ARCH >= 7
-    /* Process 4 words at a time with NEON */
-    int i;
-    for (i = 0; i + 3 < count; i += 4) {
-        uint32x4_t vec = vld1q_u32(&src[i]);
-        uint32x4_t swapped = vrev32q_u32(vec);
-        vst1q_u32(&dest[i], swapped);
-    }
-    /* Handle remaining elements */
-    for (; i < count; i++) {
-        dest[i] = le32dec(&src[i]);
-    }
-#else
+    /* Use portable byte swapping to ensure identical hash output */
     for (int i = 0; i < count; i++) {
         dest[i] = le32dec(&src[i]);
     }
-#endif
 }
 
 /* Main scanning function with all optimizations */
@@ -500,14 +502,14 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         uint64_t u64[4];
     } CACHE_ALIGN hash;
     
-    /* Keep hot data in registers */
-    register uint32_t n = pdata[19];
-    register const uint32_t Htarg = ptarget[7];
-    register uint32_t local_max_nonce = max_nonce;
-    register const uint32_t *local_ptarget = ptarget;
-    register uint32_t *local_pdata = pdata;
+    /* Keep hot data */
+    uint32_t n = pdata[19];  /* Removed register keyword to allow taking address */
+    const uint32_t Htarg = ptarget[7];
+    uint32_t local_max_nonce = max_nonce;
+    const uint32_t *local_ptarget = ptarget;
+    uint32_t *local_pdata = pdata;
     
-    /* Local copies for register retention */
+    /* Local copies */
     uint32_t temp_hash[8] CACHE_ALIGN;
     int found = 0;
     uint32_t attempts = 0;
@@ -532,7 +534,8 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         /* Try to steal work (50% chance) */
         if (++steal_check_counter >= 32) {
             steal_check_counter = 0;
-            if (try_steal_work(thr_id, &n, local_max_nonce)) {
+            uint32_t current_n = n;  /* Create a local copy for address passing */
+            if (try_steal_work(thr_id, &current_n, local_max_nonce)) {
                 /* Process stolen work first */
                 while (mining_state.steal_index < mining_state.steal_count && !found) {
                     uint32_t stolen_nonce = mining_state.stolen_work[mining_state.steal_index++];
@@ -542,8 +545,4 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                     encode_nonce(data.u32, stolen_nonce);
                     
                     if (compute_hash(data.u8, &hash.yb, stolen_nonce)) {
-                        abort();
-                    }
-                    
-                    /* Check hash */
-      
+             
