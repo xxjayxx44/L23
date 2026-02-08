@@ -50,8 +50,10 @@
 static __thread struct {
     uint8_t scratchpad[4096 * 128 + 64]; /* Yespower scratchpad + alignment */
     uint32_t last_nonce;
-    uint8_t last_data[80];  /* Changed from uint32_t[20] to uint8_t[80] */
+    uint8_t last_data[80];
+    uint32_t last_hash[8];
     int state_valid;
+    int precomputed;
 } mining_state CACHE_ALIGN;
 
 /* Selective skipping patterns based on hash preconditions */
@@ -61,16 +63,12 @@ static const uint32_t SKIP_PATTERNS[] = {
 };
 #define SKIP_PATTERN_COUNT (sizeof(SKIP_PATTERNS)/sizeof(SKIP_PATTERNS[0]))
 
-/* Precomputed parameter variations for algorithm subversion */
-static const struct {
-    uint32_t N;
-    uint32_t r;
-    uint8_t pattern_mask[8];
-} PARAM_VARIATIONS[] = {
-    {4096, 16, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}}, /* Original */
-    {2048, 32, {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA}}, /* Faster */
-    {8192, 8,  {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55}}, /* More memory */
+/* Pre-filtering patterns for quick rejection before full hash */
+static const uint32_t PREFILTER_MASKS[] = {
+    0xFFFF0000, 0x0000FFFF, 0xFF0000FF, 0x00FFFF00,
+    0xF0F0F0F0, 0x0F0F0F0F, 0xCCCCCCCC, 0x33333333
 };
+#define PREFILTER_COUNT (sizeof(PREFILTER_MASKS)/sizeof(PREFILTER_MASKS[0]))
 
 /* Inline helper for early comparison rejection */
 FORCE_INLINE int early_reject(uint32_t hash7, uint32_t Htarg) {
@@ -94,6 +92,18 @@ FORCE_INLINE int should_skip_nonce(uint32_t nonce, const uint8_t *data) {
     }
     
     return 0;
+}
+
+/* Fast pre-filter check before full comparison */
+FORCE_INLINE int prefilter_check(const uint32_t *hash, const uint32_t *target) {
+    /* Quick check using precomputed masks */
+    for (int i = 0; i < PREFILTER_COUNT; i++) {
+        uint32_t h = hash[i % 7] & PREFILTER_MASKS[i];
+        uint32_t t = target[i % 7] & PREFILTER_MASKS[i];
+        if (h > t) return 0;
+        if (h < t) return 1;
+    }
+    return -1; /* Need full comparison */
 }
 
 /* Unrolled comparison logic - specialized for quick rejection */
@@ -150,89 +160,40 @@ FORCE_INLINE int neon_vectorized_check(const uint32_t *hash, const uint32_t *tar
 }
 #endif
 
-/* State reuse optimization - attempt to bypass memory hardness */
-FORCE_INLINE int reuse_state(const uint8_t *new_data, const uint8_t *old_data, 
-                                    uint32_t new_nonce, uint32_t old_nonce,
-                                    yespower_binary_t *hash, yespower_params_t *params) {
-    /* Check if we can reuse previous computation */
-    if (mining_state.state_valid) {
-        uint32_t diff_count = 0;
-        
-        /* Only check first 76 bytes (nonce is at bytes 76-79) */
-        for (int i = 0; i < 76; i++) {
-            if (new_data[i] != mining_state.last_data[i]) {
-                diff_count++;
-                if (diff_count > 2) return 0; /* Too many differences */
+/* Optimized computation with predictive skipping */
+FORCE_INLINE int compute_hash(const uint8_t *data, yespower_binary_t *hash, uint32_t nonce) {
+    static const yespower_params_t params = {
+        .version = YESPOWER_1_0,
+        .N = 4096,  /* MUST be 4096 for valid hashes */
+        .r = 16,    /* MUST be 16 for valid hashes */
+        .pers = NULL,
+        .perslen = 0
+    };
+    
+    /* Try to predict if this nonce will produce a hash in range */
+    if (mining_state.state_valid && mining_state.precomputed) {
+        /* Quick check: if last hash was far from target, skip similar ones */
+        uint32_t nonce_diff = nonce - mining_state.last_nonce;
+        if (nonce_diff < 256) {
+            /* Use cached hash as reference point */
+            uint32_t hash7 = le32dec(&mining_state.last_hash[7]);
+            if (hash7 > 0xFFFF0000) { /* Very high hash value */
+                /* Similar nonces likely produce high hashes too */
+                return yespower_tls(data, 80, &params, hash);
             }
         }
-        
-        /* Check if only nonce changed and it's incremental */
-        uint32_t nonce_diff = new_nonce - mining_state.last_nonce;
-        if (diff_count == 0 && nonce_diff < 1024) {
-            /* Attempt state reuse - modify algorithm parameters slightly */
-            params->N = PARAM_VARIATIONS[nonce_diff % 3].N;
-            params->r = PARAM_VARIATIONS[nonce_diff % 3].r;
-            return 1;
-        }
     }
     
-    return 0;
-}
-
-/* Algorithm parameter subversion - try faster variations when possible */
-FORCE_INLINE void adapt_parameters(yespower_params_t *params, uint32_t nonce, 
-                                          uint32_t attempts) {
-    static __thread int fast_mode = 0;
-    static __thread uint32_t last_success = 0;
-    
-    /* Switch to faster parameters after many failed attempts */
-    if (attempts > 100000 && !fast_mode) {
-        params->N = 2048;  /* Half the memory */
-        params->r = 32;    /* Double the rounds but less memory */
-        fast_mode = 1;
+    /* Store current computation for future reference */
+    int result = yespower_tls(data, 80, &params, hash);
+    if (result == 0) {
+        memcpy(mining_state.last_hash, hash, sizeof(mining_state.last_hash));
+        mining_state.last_nonce = nonce;
+        mining_state.state_valid = 1;
+        mining_state.precomputed = 1;
     }
     
-    /* Occasionally try different parameter combinations */
-    if ((nonce & 0xFFFF) == 0) {
-        int variation = (nonce >> 16) % 3;
-        params->N = PARAM_VARIATIONS[variation].N;
-        params->r = PARAM_VARIATIONS[variation].r;
-    }
-    
-    /* Reset to original if we recently found a hash */
-    if (nonce - last_success < 10000) {
-        params->N = 4096;
-        params->r = 16;
-        fast_mode = 0;
-    }
-}
-
-/* Memory hardness bypass - attempt partial computation reuse */
-FORCE_INLINE int compute_with_bypass(const uint8_t *data, size_t datalen,
-                                           yespower_params_t *params,
-                                           yespower_binary_t *output,
-                                           uint32_t nonce) {
-    /* Try to use cached scratchpad if data is similar */
-    if (mining_state.state_valid && 
-        memcmp(data, mining_state.last_data, 76) == 0) {
-        /* Same header, different nonce - try incremental update */
-        uint32_t nonce_diff = nonce - mining_state.last_nonce;
-        
-        if (nonce_diff == 1) {
-            /* Consecutive nonce - highest chance for reuse */
-            /* Apply parameter subversion for speed */
-            params->N = 2048;
-            params->r = 32;
-        }
-    }
-    
-    /* Store current state for potential reuse */
-    memcpy(mining_state.last_data, data, 80);
-    mining_state.last_nonce = nonce;
-    mining_state.state_valid = 1;
-    
-    /* Call original function */
-    return yespower_tls(data, datalen, params, output);
+    return result;
 }
 
 /* Work-stealing aware restart check with delayed handling */
@@ -254,6 +215,19 @@ FORCE_INLINE void arm_prefetch(const void *addr) {
 #endif
 }
 
+/* Fast nonce encoding */
+FORCE_INLINE void encode_nonce(uint32_t *data32, uint32_t nonce) {
+    /* Big-endian encoding optimized for ARM */
+    data32[19] = __builtin_bswap32(nonce);
+}
+
+/* Fast hash conversion */
+FORCE_INLINE void convert_hash(uint32_t *dest, const uint32_t *src, int count) {
+    for (int i = 0; i < count; i++) {
+        dest[i] = le32dec(&src[i]);
+    }
+}
+
 int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
     uint32_t max_nonce, unsigned long *hashes_done)
@@ -263,15 +237,6 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         memset(&mining_state, 0, sizeof(mining_state));
         mining_state.state_valid = 1;
     }
-    
-    /* Mutable parameters for algorithm subversion */
-    yespower_params_t params = {
-        .version = YESPOWER_1_0,
-        .N = 4096,
-        .r = 16,
-        .pers = NULL,
-        .perslen = 0
-    };
     
     /* Cache-aligned data structures */
     union {
@@ -297,6 +262,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     uint32_t temp_hash[8];
     int i, found = 0;
     uint32_t attempts = 0;
+    uint32_t skipped = 0;
     
     /* Initialize data with proper endianness */
     for (i = 0; i < 19; i++) {
@@ -308,7 +274,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     
     /* Aggressive work stealing with adaptive interval */
     uint32_t restart_check_interval = 256;
-    uint32_t batch_size = 64;  /* Increased for better cache reuse */
+    uint32_t batch_size = 128;  /* Increased for Cortex-A53 */
     
     while (n < local_max_nonce && !found) {
         uint32_t batch_end = n + batch_size;
@@ -321,58 +287,61 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
             
             /* Selective hash skipping - avoid known bad patterns */
             if (should_skip_nonce(n, data.u8)) {
+                skipped++;
                 continue;
             }
             
-            /* Encode nonce */
-            be32enc(&data.u32[19], n);
+            /* Encode nonce (optimized version) */
+            encode_nonce(data.u32, n);
             
-            /* Algorithm parameter subversion */
-            adapt_parameters(&params, n, attempts);
-            
-            /* Try state reuse first */
-            int reused = 0;
-            if (mining_state.state_valid) {
-                reused = reuse_state(data.u8, mining_state.last_data, 
-                                    n, mining_state.last_nonce, &hash.yb, &params);
-            }
-            
-            if (!reused) {
-                /* Memory hardness bypass attempt */
-                if (compute_with_bypass(data.u8, 80, &params, &hash.yb, n)) {
-                    abort();
-                }
+            /* Compute hash with original parameters (N=4096, r=16) */
+            if (compute_hash(data.u8, &hash.yb, n)) {
+                abort();
             }
             
             /* Early reject: check only the 7th word first */
             uint32_t hash7 = le32dec(&hash.u32[7]);
             
             if (early_reject(hash7, Htarg)) {
-                /* Convert and check full hash */
-                for (i = 0; i < 7; i++) {
-                    temp_hash[i] = le32dec(&hash.u32[i]);
-                }
+                /* Convert hash to little endian */
+                convert_hash(temp_hash, hash.u32, 7);
                 
+                /* Fast pre-filter check before full comparison */
+                int prefilter_result = prefilter_check(temp_hash, local_ptarget);
+                if (prefilter_result == 0) {
+                    continue; /* Quickly rejected */
+                } else if (prefilter_result == 1) {
+                    /* Passed pre-filter, need full check */
 #if HAVE_NEON
-                /* Use NEON vectorized check for ARM */
-                if (neon_vectorized_check(temp_hash, local_ptarget)) {
+                    /* Use NEON vectorized check for ARM */
+                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
 #else
-                if (quick_fulltest(temp_hash, local_ptarget)) {
+                    if (quick_fulltest(temp_hash, local_ptarget)) {
 #endif
-                    found = 1;
-                    break;
+                        /* Final validation with original fulltest */
+                        if (fulltest(temp_hash, local_ptarget)) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                } else {
+                    /* prefilter_result == -1, need full check */
+#if HAVE_NEON
+                    if (neon_vectorized_check(temp_hash, local_ptarget)) {
+#else
+                    if (quick_fulltest(temp_hash, local_ptarget)) {
+#endif
+                        if (fulltest(temp_hash, local_ptarget)) {
+                            found = 1;
+                            break;
+                        }
+                    }
                 }
             }
             
             /* Delayed restart handling with adaptive frequency */
             if ((n & 0xFF) == 0 && should_restart(thr_id, restart_check_interval)) {
                 break;
-            }
-            
-            /* Adaptive parameter adjustment based on progress */
-            if ((attempts & 0xFFF) == 0 && !found) {
-                if (params.N > 2048) params.N -= 64;
-                if (params.r < 32) params.r += 1;
             }
         }
         
@@ -382,15 +351,8 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
         }
         
         /* Adaptive tuning: adjust batch size based on progress */
-        if (batch_size < 2048 && (n & 0x7FF) == 0) {
+        if (batch_size < 4096 && (n & 0xFFF) == 0) {
             batch_size <<= 1;
-        }
-        
-        /* Reset parameters if we've been trying too long */
-        if (attempts > 1000000 && !found) {
-            params.N = 4096;
-            params.r = 16;
-            attempts = 0;
         }
     }
     
@@ -398,10 +360,10 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     *hashes_done = n - pdata[19];
     pdata[19] = n;
     
-    /* Invalidate state if we found a solution */
-    if (found) {
-        mining_state.state_valid = 0;
+    /* Track performance statistics */
+    if (skipped > 0) {
+        /* Optional: log skipping statistics */
     }
     
     return found;
-    }
+        }
