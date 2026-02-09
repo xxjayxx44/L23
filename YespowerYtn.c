@@ -122,7 +122,8 @@ static int enhanced_yespower_hash(const uint8_t* data, size_t datalen,
     yespower_binary_t hash_bin;
     int ret = yespower_tls(data, datalen, used_params, &hash_bin);
     if (ret == 0) {
-        memcpy(output, hash_bin, 32);
+        /* Copy the hash result - yespower_binary_t is likely an array of uint8_t[32] */
+        memcpy(output, (const uint8_t*)&hash_bin, 32);
     }
     
     return ret;
