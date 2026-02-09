@@ -221,10 +221,12 @@ FORCE_INLINE int compute_hash_original(const uint8_t *data, uint32_t *hash_out, 
         return -1;
     }
     
-    /* FIX: Access hash bytes correctly - yespower_binary_t is just bytes */
+    /* FIX: Access hash bytes correctly - yespower_binary_t has uc (unsigned char) */
     /* Convert from little-endian byte array to uint32_t */
     for (int i = 0; i < 8; i++) {
-        hash_out[i] = le32dec(hash.wc + i * 4);
+        uint32_t val;
+        memcpy(&val, &hash.uc[i * 4], 4);
+        hash_out[i] = le32dec(&val);
     }
     
     return 0;
@@ -372,11 +374,7 @@ int scanhash_ytn_yespower_pure_original(int thr_id, uint32_t *pdata,
         uint32_t u32[20];
     } data;
     
-    union {
-        yespower_binary_t yb;
-        uint32_t u32[8];
-    } hash;
-    
+    yespower_binary_t hash;
     uint32_t n = pdata[19] - 1;
     const uint32_t Htarg = ptarget[7];
     int i;
@@ -388,14 +386,16 @@ int scanhash_ytn_yespower_pure_original(int thr_id, uint32_t *pdata,
     do {
         be32enc(&data.u32[19], ++n);
         
-        if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
+        if (yespower_tls(data.u8, 80, &params, &hash)) {
             abort();
         }
         
-        /* FIX: Access hash bytes correctly */
+        /* FIX: Access hash bytes correctly using uc */
         uint32_t hash_u32[8];
         for (i = 0; i < 8; i++) {
-            hash_u32[i] = le32dec(hash.yb.wc + i * 4);
+            uint32_t val;
+            memcpy(&val, &hash.uc[i * 4], 4);
+            hash_u32[i] = le32dec(&val);
         }
         
         if (hash_u32[7] <= Htarg) {
