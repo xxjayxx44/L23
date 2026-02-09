@@ -77,6 +77,7 @@ void init_work_stealing(void) {
     global_pool.work_available = 0;
     pthread_spin_init(&global_pool.lock, PTHREAD_PROCESS_PRIVATE);
 }
+
 /* Simple work stealing function - safe for ARM */
 FORCE_INLINE int try_steal_work_safe(int thr_id, uint32_t *nonce_ptr, uint32_t max_nonce) {
     /* Only try to steal if we're running out of work */
@@ -198,7 +199,7 @@ FORCE_INLINE int arm_hash_check(const uint32_t *hash, const uint32_t *target, ui
 }
 #endif
 
-/* Original hash computation - MUST NOT CHANGE */
+/* FIXED: Original hash computation - correct yespower_binary_t access */
 FORCE_INLINE int compute_hash_original(const uint8_t *data, uint32_t *hash_out, uint32_t nonce) {
     static const yespower_params_t params = {
         .version = YESPOWER_1_0,
@@ -220,13 +221,15 @@ FORCE_INLINE int compute_hash_original(const uint8_t *data, uint32_t *hash_out, 
         return -1;
     }
     
-    /* Convert to little endian for checking */
+    /* FIX: Access hash bytes correctly - yespower_binary_t is just bytes */
+    /* Convert from little-endian byte array to uint32_t */
     for (int i = 0; i < 8; i++) {
-        hash_out[i] = le32dec(&hash.u32[i]);
+        hash_out[i] = le32dec(hash.wc + i * 4);
     }
     
     return 0;
 }
+
 /* Main scanning function - optimized for ARM with 100% compatibility */
 int scanhash_ytn_yespower_fixed(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
@@ -389,11 +392,18 @@ int scanhash_ytn_yespower_pure_original(int thr_id, uint32_t *pdata,
             abort();
         }
         
-        if (le32dec(&hash.u32[7]) <= Htarg) {
+        /* FIX: Access hash bytes correctly */
+        uint32_t hash_u32[8];
+        for (i = 0; i < 8; i++) {
+            hash_u32[i] = le32dec(hash.yb.wc + i * 4);
+        }
+        
+        if (hash_u32[7] <= Htarg) {
+            uint32_t temp_hash[7];
             for (i = 0; i < 7; i++) {
-                hash.u32[i] = le32dec(&hash.u32[i]);
+                temp_hash[i] = hash_u32[i];
             }
-            if (fulltest(hash.u32, ptarget)) {
+            if (fulltest(temp_hash, ptarget)) {
                 *hashes_done = n - pdata[19] + 1;
                 pdata[19] = n;
                 return 1;
