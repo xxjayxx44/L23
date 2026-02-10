@@ -86,7 +86,6 @@ static uint32_t subspace_mask = 0x7FFFFFFF; /* Search easier subspaces */
 
 /* Memory hardness reduction controls */
 static int reduce_memory_hardness = 0;
-static int cache_optimized = 1;
 
 /* Thread restart signaling */
 extern volatile int mining_restart_requested;
@@ -885,60 +884,6 @@ static volatile uint64_t Smask2var = Smask2;
 
 #endif
 
-/* Optimized blockmix with cache awareness */
-static void blockmix_optimized(const salsa20_blk_t *restrict Bin,
-    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx,
-    uint32_t nonce)
-{
-    CHECK_EARLY_EXIT_VOID()
-    
-    if (should_skip_computation((uint32_t*)Bin, nonce)) {
-        return;
-    }
-
-    /* Memory hardness reduction */
-    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
-        r = (r * ctx->reduced_N) / ctx->Sbytes;
-        if (r < 1) r = 1;
-    }
-
-	if (unlikely(!ctx)) {
-		blockmix_salsa(Bin, Bout);
-		return;
-	}
-
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-#if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
-#endif
-	size_t i;
-	DECL_X
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-	READ_X(Bin[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	do {
-		XOR_X(Bin[i])
-		PWXFORM
-		if (unlikely(i >= r))
-			break;
-		WRITE_X(Bout[i])
-		i++;
-	} while (1);
-
-#if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
-#endif
-
-	SALSA20(Bout[i])
-}
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -986,7 +931,6 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 
 	SALSA20(Bout[i])
 }
-
 static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
     size_t r, pwxform_ctx_t *restrict ctx)
@@ -1315,6 +1259,10 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 #define smix smix_1_0
 #include "yespower-opt.c"
 #undef smix
+
+/* Forward declaration for smix_1_0 used in yespower function */
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
 
 /**
  * yespower(local, src, srclen, params, dst):
