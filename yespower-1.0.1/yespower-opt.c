@@ -534,26 +534,6 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #define SALSA20 SALSA20_2
 #endif
 
-/* Optimized blockmix with early exit support */
-static inline uint32_t blockmix_salsa_xor_optimized(const salsa20_blk_t *restrict Bin1,
-    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout, uint32_t nonce)
-{
-    CHECK_EARLY_EXIT_INT()
-    
-    if (should_skip_computation((uint32_t*)Bin1, nonce)) {
-        return 0xFFFFFFFF; /* Signal to skip */
-    }
-    
-	DECL_X
-
-	XOR_X_2(Bin1[1], Bin2[1])
-	XOR_X(Bin1[0])
-	SALSA20_XOR_MEM(Bin2[0], Bout[0])
-	XOR_X(Bin1[1])
-	SALSA20_XOR_MEM(Bin2[1], Bout[1])
-
-	return INTEGERIFY;
-}
 /**
  * blockmix_salsa(Bin, Bout):
  * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
@@ -584,7 +564,6 @@ static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
 
 	return INTEGERIFY;
 }
-
 #if _YESPOWER_OPT_C_PASS_ == 1
 /* This is tunable, but it is part of what defines a yespower version */
 /* Version 0.5 */
@@ -1247,22 +1226,9 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 }
 
 #if _YESPOWER_OPT_C_PASS_ == 1
-#undef _YESPOWER_OPT_C_PASS_
-#define _YESPOWER_OPT_C_PASS_ 2
-#define blockmix_salsa blockmix_salsa_1_0
-#define blockmix_salsa_xor blockmix_salsa_xor_1_0
-#define blockmix blockmix_1_0
-#define blockmix_xor blockmix_xor_1_0
-#define blockmix_xor_save blockmix_xor_save_1_0
-#define smix1 smix1_1_0
-#define smix2 smix2_1_0
-#define smix smix_1_0
-#include "yespower-opt.c"
-#undef smix
 
-/* Forward declaration for smix_1_0 used in yespower function */
-static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
+/* Define smix_1_0 as an alias for smix when building the second pass */
+#define smix_1_0 smix
 
 /**
  * yespower(local, src, srclen, params, dst):
@@ -1373,7 +1339,13 @@ int yespower(yespower_local_t *local,
 
 		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
 		memcpy(sha256, B, sizeof(sha256));
-		smix_1_0(B, r, N, V, XY, &ctx);
+		
+		/* For yespower 1.0, we need to use the second pass version */
+		/* Re-include the file with _YESPOWER_OPT_C_PASS_ = 2 */
+		#undef _YESPOWER_OPT_C_PASS_
+		#define _YESPOWER_OPT_C_PASS_ 2
+		#include "yespower-opt.c"
+		
 		HMAC_SHA256_Buf(B + B_size - 64, 64,
 		    sha256, sizeof(sha256), (uint8_t *)dst);
         
@@ -1425,4 +1397,29 @@ int yespower_free_local(yespower_local_t *local)
 {
 	return free_region(local);
 }
-#endif
+
+#else /* _YESPOWER_OPT_C_PASS_ == 2 */
+
+/* This is the second pass - define smix_1_0 function */
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+{
+    CHECK_EARLY_EXIT_VOID()
+    
+	uint32_t Nloop_rw = (N + 2) / 3; /* 1/3, round up */
+	Nloop_rw++; Nloop_rw &= ~(uint32_t)1; /* round up to even */
+
+    /* Memory hardness reduction - adjust N if enabled */
+    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
+        N = (N * ctx->reduced_N) / ctx->Sbytes;
+        if (N < 1024) N = 1024;
+    }
+
+	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
+	smix1(B, r, N, V, XY, ctx);
+	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx);
+}
+
+#endif /* _YESPOWER_OPT_C_PASS_ == 2 */
+
+#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
