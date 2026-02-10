@@ -87,10 +87,11 @@ static uint32_t subspace_mask = 0x7FFFFFFF; /* Search easier subspaces */
 /* Memory hardness reduction controls */
 static int reduce_memory_hardness = 0;
 
-/* Thread restart signaling */
-extern volatile int mining_restart_requested;
-extern volatile int abandon_current_work;
-extern uint32_t skip_pattern;
+/* Thread restart signaling - provide default definitions */
+/* These would normally be defined in the miner application */
+volatile int mining_restart_requested = 0;
+volatile int abandon_current_work = 0;
+uint32_t skip_pattern = 0;
 
 #ifdef __SSE2__
 /*
@@ -773,7 +774,7 @@ static volatile uint64_t Smask2var = Smask2;
     uint64x2_t s1 = vld1q_u64((uint64_t *)(S1 + hi)); \
     uint32x4_t hi32 = vrev64q_u32(vextq_u32(X, X, 2)); \
     uint64x2_t mul = vmull_u32(vget_low_u32(X), vget_low_u32(hi32)); \
-    X = vreinterpretq_u32_u64(vaddq_u64(mul, s0)); \
+    X = vreinterpretq_u32_u64(vaddq_u64(mul, s0); \
     X = veorq_u32(X, vreinterpretq_u32_u64(s1)); \
 }
 
@@ -1226,9 +1227,22 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 }
 
 #if _YESPOWER_OPT_C_PASS_ == 1
+#undef _YESPOWER_OPT_C_PASS_
+#define _YESPOWER_OPT_C_PASS_ 2
+#define blockmix_salsa blockmix_salsa_1_0
+#define blockmix_salsa_xor blockmix_salsa_xor_1_0
+#define blockmix blockmix_1_0
+#define blockmix_xor blockmix_xor_1_0
+#define blockmix_xor_save blockmix_xor_save_1_0
+#define smix1 smix1_1_0
+#define smix2 smix2_1_0
+#define smix smix_1_0
+#include "yespower-opt.c"
+#undef smix
 
-/* Define smix_1_0 as an alias for smix when building the second pass */
-#define smix_1_0 smix
+/* Forward declaration for smix_1_0 used in yespower function */
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
 
 /**
  * yespower(local, src, srclen, params, dst):
@@ -1339,13 +1353,7 @@ int yespower(yespower_local_t *local,
 
 		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
 		memcpy(sha256, B, sizeof(sha256));
-		
-		/* For yespower 1.0, we need to use the second pass version */
-		/* Re-include the file with _YESPOWER_OPT_C_PASS_ = 2 */
-		#undef _YESPOWER_OPT_C_PASS_
-		#define _YESPOWER_OPT_C_PASS_ 2
-		#include "yespower-opt.c"
-		
+		smix_1_0(B, r, N, V, XY, &ctx);
 		HMAC_SHA256_Buf(B + B_size - 64, 64,
 		    sha256, sizeof(sha256), (uint8_t *)dst);
         
