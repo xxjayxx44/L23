@@ -50,15 +50,15 @@
  * XOP, some slowdown is sometimes observed on Intel CPUs with AVX.
  */
 #ifdef __XOP__
-#warning "Note: XOP is enabled.  That's great."
+/* Note: XOP is enabled. That's great. */
 #elif defined(__AVX__)
-#warning "Note: AVX is enabled.  That's OK."
+/* Note: AVX is enabled. That's OK. */
 #elif defined(__SSE2__)
-#warning "Note: AVX and XOP are not enabled.  That's OK."
+/* Note: AVX and XOP are not enabled. That's OK. */
 #elif defined(__x86_64__) || defined(__i386__)
-#warning "SSE2 not enabled.  Expect poor performance."
+/* SSE2 not enabled. Expect poor performance. */
 #else
-#warning "Note: building generic code for non-x86.  That's OK."
+/* Note: building generic code for non-x86. That's OK. */
 #endif
 
 /*
@@ -68,7 +68,7 @@
 #ifdef __aarch64__
 #include <arm_neon.h>
 #define USE_NEON
-#warning "Note: Building with ARM NEON optimizations for Dimensity 6300"
+/* Note: Building with ARM NEON optimizations for Dimensity 6300 */
 #endif
 
 /*
@@ -143,13 +143,18 @@ extern uint32_t skip_pattern;
 #ifdef __SSE__
 #define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint));
 #elif defined(USE_NEON)
-#define PREFETCH(x, hint) __builtin_prefetch((x), 0, (hint));
+#define PREFETCH(x, hint) __builtin_prefetch((x), 0, 0);
 #else
 #undef PREFETCH
 #endif
 
 /* Memory/caching shortcuts for early exits */
-#define CHECK_EARLY_EXIT() \
+#define CHECK_EARLY_EXIT_VOID() \
+    if (enable_early_exit && mining_restart_requested) { \
+        return; \
+    }
+
+#define CHECK_EARLY_EXIT_INT() \
     if (enable_early_exit && mining_restart_requested) { \
         return 0; \
     }
@@ -369,6 +374,10 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 #define SALSA20_2_NEON(out) \
     SALSA20_wrapper_NEON(out, SALSA20_2ROUNDS_NEON)
 
+#define SALSA20_8_NEON(out) \
+    SALSA20_wrapper_NEON(out, SALSA20_2ROUNDS_NEON SALSA20_2ROUNDS_NEON \
+                         SALSA20_2ROUNDS_NEON SALSA20_2ROUNDS_NEON)
+
 #define XOR_X_NEON(in) \
     X0 = veorq_u32(X0, (in).v[0]); \
     X1 = veorq_u32(X1, (in).v[1]); \
@@ -381,9 +390,27 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
     X2 = veorq_u32((in1).v[2], (in2).v[2]); \
     X3 = veorq_u32((in1).v[3], (in2).v[3]);
 
+#define XOR_X_WRITE_XOR_Y_2_NEON(out, in) \
+    (out).v[0] = Y0 = veorq_u32((out).v[0], (in).v[0]); \
+    (out).v[1] = Y1 = veorq_u32((out).v[1], (in).v[1]); \
+    (out).v[2] = Y2 = veorq_u32((out).v[2], (in).v[2]); \
+    (out).v[3] = Y3 = veorq_u32((out).v[3], (in).v[3]); \
+    X0 = veorq_u32(X0, Y0); \
+    X1 = veorq_u32(X1, Y1); \
+    X2 = veorq_u32(X2, Y2); \
+    X3 = veorq_u32(X3, Y3);
+
 #define INTEGERIFY_NEON apply_bias(vgetq_lane_u32(X0, 0), 0)
 
-#else /* !defined(__SSE2__) */
+/* Use NEON versions */
+#define XOR_X XOR_X_NEON
+#define XOR_X_2 XOR_X_2_NEON
+#define XOR_X_WRITE_XOR_Y_2 XOR_X_WRITE_XOR_Y_2_NEON
+#define INTEGERIFY INTEGERIFY_NEON
+#define SALSA20_8 SALSA20_8_NEON
+#define SALSA20_2 SALSA20_2_NEON
+
+#else /* !defined(__SSE2__) && !defined(USE_NEON) */
 
 #define DECL_X \
 	salsa20_blk_t X;
@@ -490,13 +517,18 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #define INTEGERIFY apply_bias((uint32_t)X.d[0], 0)
 #endif
 
-/**
- * Apply the Salsa20 core to the block provided in X ^ in.
- */
+/* Define SALSA20 based on architecture */
+#if defined(__SSE2__) || defined(USE_NEON)
 #define SALSA20_XOR_MEM(in, out) \
 	XOR_X(in) \
 	SALSA20(out)
+#else
+#define SALSA20_XOR_MEM(in, out) \
+	XOR_X(in) \
+	SALSA20(out)
+#endif
 
+#if _YESPOWER_OPT_C_PASS_ == 1
 #define SALSA20 SALSA20_8
 #else /* pass 2 */
 #undef SALSA20
@@ -507,7 +539,7 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 static inline uint32_t blockmix_salsa_xor_optimized(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout, uint32_t nonce)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_INT()
     
     if (should_skip_computation((uint32_t*)Bin1, nonce)) {
         return 0xFFFFFFFF; /* Signal to skip */
@@ -531,7 +563,7 @@ static inline uint32_t blockmix_salsa_xor_optimized(const salsa20_blk_t *restric
 static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
 	DECL_X
 
@@ -680,7 +712,7 @@ static volatile uint64_t Smask2var = Smask2;
 /* 64-bit without AVX.  This relies on out-of-order execution and register
  * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
  * it runs great on Haswell. */
-#warning "Note: using x86-64 inline assembly for pwxform.  That's great."
+/* using x86-64 inline assembly for pwxform. */
 #undef MAYBE_MEMORY_BARRIER
 #define MAYBE_MEMORY_BARRIER \
 	__asm__("" : : : "memory");
@@ -755,7 +787,7 @@ static volatile uint64_t Smask2var = Smask2;
 
 #elif defined(USE_NEON)
 /* ARM NEON pwxform for Dimensity 6300 */
-#define PWXFORM_SIMD_NEON(X) { \
+#define PWXFORM_SIMD(X) { \
     uint64x2_t x = vandq_u64(vreinterpretq_u64_u32(X), vdupq_n_u64(Smask2)); \
     uint32_t lo = vgetq_lane_u32(vreinterpretq_u32_u64(x), 0); \
     uint32_t hi = vgetq_lane_u32(vreinterpretq_u32_u64(x), 2); \
@@ -767,13 +799,32 @@ static volatile uint64_t Smask2var = Smask2;
     X = veorq_u32(X, vreinterpretq_u32_u64(s1)); \
 }
 
-#define PWXFORM_ROUND_NEON \
-    PWXFORM_SIMD_NEON(X0) \
-    PWXFORM_SIMD_NEON(X1) \
-    PWXFORM_SIMD_NEON(X2) \
-    PWXFORM_SIMD_NEON(X3)
+#define PWXFORM_SIMD_WRITE(X, Sw) \
+    PWXFORM_SIMD(X) \
+    vst1q_u32((uint32_t *)(Sw + w), X);
 
-#else /* !defined(__SSE2__) */
+#define PWXFORM_ROUND \
+    PWXFORM_SIMD(X0) \
+    PWXFORM_SIMD(X1) \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
+
+#define PWXFORM_ROUND_WRITE4 \
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD_WRITE(X2, S0) \
+    PWXFORM_SIMD_WRITE(X3, S1) \
+    w += 16;
+
+#define PWXFORM_ROUND_WRITE2 \
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
+
+#else /* !defined(__SSE2__) && !defined(USE_NEON) */
 
 #define PWXFORM_SIMD(x0, x1) { \
 	uint64_t x = x0 & Smask2; \
@@ -839,7 +890,7 @@ static void blockmix_optimized(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx,
     uint32_t nonce)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
     if (should_skip_computation((uint32_t*)Bin, nonce)) {
         return;
@@ -896,7 +947,7 @@ static void blockmix_optimized(const salsa20_blk_t *restrict Bin,
 static void blockmix(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
 	if (unlikely(!ctx)) {
 		blockmix_salsa(Bin, Bout);
@@ -940,7 +991,7 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_INT()
     
 	if (unlikely(!ctx))
 		return blockmix_salsa_xor(Bin1, Bin2, Bout);
@@ -957,9 +1008,9 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	PREFETCH(&Bin2[r], 0)
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
+		PREFETCH(&Bin2[i], 0)
 	}
 #endif
 
@@ -1002,7 +1053,7 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     salsa20_blk_t *restrict Bin2,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_INT()
     
 	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
@@ -1017,9 +1068,9 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	PREFETCH(&Bin2[r], 0)
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
+		PREFETCH(&Bin2[i], 0)
 	}
 #endif
 
@@ -1085,7 +1136,7 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
 static void smix1(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
 	size_t s = 2 * r;
 	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
@@ -1164,7 +1215,7 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
 	size_t s = 2 * r;
 	salsa20_blk_t *X = XY, *Y = &XY[s];
@@ -1223,7 +1274,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 static void smix(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
-    CHECK_EARLY_EXIT()
+    CHECK_EARLY_EXIT_VOID()
     
 #if _YESPOWER_OPT_C_PASS_ == 1
 	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
