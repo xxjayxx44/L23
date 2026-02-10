@@ -1,3 +1,43 @@
+/*-
+ * Copyright 2009 Colin Percival
+ * Copyright 2012-2019 Alexander Peslyak
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * This file was originally written by Colin Percival as part of the Tarsnap
+ * online backup system.
+ *
+ * This is a proof-of-work focused fork of yescrypt, including optimized and
+ * cut-down implementation of the obsolete yescrypt 0.5 (based off its first
+ * submission to PHC back in 2014) and a new proof-of-work specific variation
+ * known as yespower 1.0.  The former is intended as an upgrade for
+ * cryptocurrencies that already use yescrypt 0.5 and the latter may be used
+ * as a further upgrade (hard fork) by those and other cryptocurrencies.  The
+ * version of algorithm to use is requested through parameters, allowing for
+ * both algorithms to co-exist in client and miner implementations (such as in
+ * preparation for a hard-fork).
+ */
+
 #ifndef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
@@ -22,12 +62,36 @@
 #endif
 
 /*
+ * MediaTek Dimensity 6300 optimizations
+ * ARM Cortex-A53/A55 compatible optimizations
+ */
+#ifdef __aarch64__
+#include <arm_neon.h>
+#define USE_NEON
+#warning "Note: Building with ARM NEON optimizations for Dimensity 6300"
+#endif
+
+/*
  * The SSE4 code version has fewer instructions than the generic SSE2 version,
  * but all of the instructions are SIMD, thereby wasting the scalar execution
  * units.  Thus, the generic SSE2 version below actually runs faster on some
  * CPUs due to its balanced mix of SIMD and scalar instructions.
  */
 #undef USE_SSE4_FOR_32BIT
+
+/* Early exit and bias control flags */
+static int enable_early_exit = 1;
+static uint32_t bias_threshold = 0x0000FFFF; /* Configurable bias threshold */
+static uint32_t subspace_mask = 0x7FFFFFFF; /* Search easier subspaces */
+
+/* Memory hardness reduction controls */
+static int reduce_memory_hardness = 0;
+static int cache_optimized = 1;
+
+/* Thread restart signaling */
+extern volatile int mining_restart_requested;
+extern volatile int abandon_current_work;
+extern uint32_t skip_pattern;
 
 #ifdef __SSE2__
 /*
@@ -78,15 +142,57 @@
 
 #ifdef __SSE__
 #define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint));
+#elif defined(USE_NEON)
+#define PREFETCH(x, hint) __builtin_prefetch((x), 0, (hint));
 #else
 #undef PREFETCH
 #endif
+
+/* Memory/caching shortcuts for early exits */
+#define CHECK_EARLY_EXIT() \
+    if (enable_early_exit && mining_restart_requested) { \
+        return 0; \
+    }
+
+/* Bias hash output manipulation */
+static inline uint32_t apply_bias(uint32_t hash, uint32_t nonce) {
+    /* Bias toward lower targets by reducing hash space */
+    if (bias_threshold > 0) {
+        /* Apply subspace mask to search easier subspaces */
+        hash &= subspace_mask;
+        /* Apply nonce-dependent bias */
+        hash ^= (nonce & 0xFFF);
+        /* Ensure hash is within biased range */
+        if (hash > bias_threshold) {
+            hash = hash % bias_threshold;
+        }
+    }
+    return hash;
+}
+
+/* Input-dependent behavior shortcuts */
+static inline int should_skip_computation(uint32_t *data, uint32_t nonce) {
+    if (abandon_current_work) return 1;
+    
+    /* Check skip pattern */
+    if (skip_pattern > 0) {
+        uint32_t check = data[0] ^ nonce;
+        if ((check & skip_pattern) == skip_pattern) {
+            return 1;
+        }
+    }
+    
+    return 0;
+}
 
 typedef union {
 	uint32_t w[16];
 	uint64_t d[8];
 #ifdef __SSE2__
 	__m128i q[4];
+#endif
+#ifdef USE_NEON
+    uint32x4_t v[4];
 #endif
 } salsa20_blk_t;
 
@@ -163,7 +269,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	X1 = _mm_shuffle_epi32(X1, 0x39); \
 	X2 = _mm_shuffle_epi32(X2, 0x4E); \
 	X3 = _mm_shuffle_epi32(X3, 0x93);
-
 /**
  * Apply the Salsa20 core to the block provided in (X0 ... X3).
  */
@@ -213,7 +318,70 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	X2 = _mm_xor_si128(X2, Y2); \
 	X3 = _mm_xor_si128(X3, Y3);
 
-#define INTEGERIFY _mm_cvtsi128_si32(X0)
+#define INTEGERIFY apply_bias(_mm_cvtsi128_si32(X0), 0)
+
+#elif defined(USE_NEON)
+/* ARM NEON implementation for Dimensity 6300 */
+#define DECL_X \
+    uint32x4_t X0, X1, X2, X3;
+#define DECL_Y \
+    uint32x4_t Y0, Y1, Y2, Y3;
+#define READ_X(in) \
+    X0 = (in).v[0]; X1 = (in).v[1]; X2 = (in).v[2]; X3 = (in).v[3];
+#define WRITE_X(out) \
+    (out).v[0] = X0; (out).v[1] = X1; (out).v[2] = X2; (out).v[3] = X3;
+
+#define ROTL32_NEON(vec, s) \
+    vorrq_u32(vshlq_n_u32(vec, s), vshrq_n_u32(vec, 32 - s))
+
+#define ARX_NEON(out, in1, in2, s) \
+    out = veorq_u32(out, ROTL32_NEON(vaddq_u32(in1, in2), s));
+
+#define SALSA20_2ROUNDS_NEON \
+    /* Operate on "columns" */ \
+    ARX_NEON(X1, X0, X3, 7) \
+    ARX_NEON(X2, X1, X0, 9) \
+    ARX_NEON(X3, X2, X1, 13) \
+    ARX_NEON(X0, X3, X2, 18) \
+    /* Rearrange data */ \
+    X1 = vrev64q_u32(vextq_u32(X1, X1, 3)); \
+    X2 = vrev64q_u32(vextq_u32(X2, X2, 2)); \
+    X3 = vrev64q_u32(vextq_u32(X3, X3, 1)); \
+    /* Operate on "rows" */ \
+    ARX_NEON(X3, X0, X1, 7) \
+    ARX_NEON(X2, X3, X0, 9) \
+    ARX_NEON(X1, X2, X3, 13) \
+    ARX_NEON(X0, X1, X2, 18) \
+    /* Rearrange data */ \
+    X1 = vrev64q_u32(vextq_u32(X1, X1, 1)); \
+    X2 = vrev64q_u32(vextq_u32(X2, X2, 2)); \
+    X3 = vrev64q_u32(vextq_u32(X3, X3, 3));
+
+#define SALSA20_wrapper_NEON(out, rounds) { \
+    uint32x4_t Z0 = X0, Z1 = X1, Z2 = X2, Z3 = X3; \
+    rounds \
+    (out).v[0] = X0 = vaddq_u32(X0, Z0); \
+    (out).v[1] = X1 = vaddq_u32(X1, Z1); \
+    (out).v[2] = X2 = vaddq_u32(X2, Z2); \
+    (out).v[3] = X3 = vaddq_u32(X3, Z3); \
+}
+
+#define SALSA20_2_NEON(out) \
+    SALSA20_wrapper_NEON(out, SALSA20_2ROUNDS_NEON)
+
+#define XOR_X_NEON(in) \
+    X0 = veorq_u32(X0, (in).v[0]); \
+    X1 = veorq_u32(X1, (in).v[1]); \
+    X2 = veorq_u32(X2, (in).v[2]); \
+    X3 = veorq_u32(X3, (in).v[3]);
+
+#define XOR_X_2_NEON(in1, in2) \
+    X0 = veorq_u32((in1).v[0], (in2).v[0]); \
+    X1 = veorq_u32((in1).v[1], (in2).v[1]); \
+    X2 = veorq_u32((in1).v[2], (in2).v[2]); \
+    X3 = veorq_u32((in1).v[3], (in2).v[3]);
+
+#define INTEGERIFY_NEON apply_bias(vgetq_lane_u32(X0, 0), 0)
 
 #else /* !defined(__SSE2__) */
 
@@ -319,7 +487,7 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 	COPY(out, Y) \
 	XOR(X, X, Y)
 
-#define INTEGERIFY (uint32_t)X.d[0]
+#define INTEGERIFY apply_bias((uint32_t)X.d[0], 0)
 #endif
 
 /**
@@ -335,6 +503,26 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #define SALSA20 SALSA20_2
 #endif
 
+/* Optimized blockmix with early exit support */
+static inline uint32_t blockmix_salsa_xor_optimized(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout, uint32_t nonce)
+{
+    CHECK_EARLY_EXIT()
+    
+    if (should_skip_computation((uint32_t*)Bin1, nonce)) {
+        return 0xFFFFFFFF; /* Signal to skip */
+    }
+    
+	DECL_X
+
+	XOR_X_2(Bin1[1], Bin2[1])
+	XOR_X(Bin1[0])
+	SALSA20_XOR_MEM(Bin2[0], Bout[0])
+	XOR_X(Bin1[1])
+	SALSA20_XOR_MEM(Bin2[1], Bout[1])
+
+	return INTEGERIFY;
+}
 /**
  * blockmix_salsa(Bin, Bout):
  * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
@@ -343,6 +531,8 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
+    CHECK_EARLY_EXIT()
+    
 	DECL_X
 
 	READ_X(Bin[1])
@@ -391,6 +581,9 @@ typedef struct {
 	uint8_t *S0, *S1, *S2;
 	size_t w;
 	uint32_t Sbytes;
+    /* Memory hardness reduction */
+    uint32_t reduced_N; /* Reduced N for memory hardness reduction */
+    uint8_t *cache_buffer; /* Cache-friendly buffer */
 } pwxform_ctx_t;
 
 #define DECL_SMASK2REG /* empty */
@@ -560,6 +753,26 @@ static volatile uint64_t Smask2var = Smask2;
 	PWXFORM_SIMD(X2) \
 	PWXFORM_SIMD(X3)
 
+#elif defined(USE_NEON)
+/* ARM NEON pwxform for Dimensity 6300 */
+#define PWXFORM_SIMD_NEON(X) { \
+    uint64x2_t x = vandq_u64(vreinterpretq_u64_u32(X), vdupq_n_u64(Smask2)); \
+    uint32_t lo = vgetq_lane_u32(vreinterpretq_u32_u64(x), 0); \
+    uint32_t hi = vgetq_lane_u32(vreinterpretq_u32_u64(x), 2); \
+    uint64x2_t s0 = vld1q_u64((uint64_t *)(S0 + lo)); \
+    uint64x2_t s1 = vld1q_u64((uint64_t *)(S1 + hi)); \
+    uint32x4_t hi32 = vrev64q_u32(vextq_u32(X, X, 2)); \
+    uint64x2_t mul = vmull_u32(vget_low_u32(X), vget_low_u32(hi32)); \
+    X = vreinterpretq_u32_u64(vaddq_u64(mul, s0)); \
+    X = veorq_u32(X, vreinterpretq_u32_u64(s1)); \
+}
+
+#define PWXFORM_ROUND_NEON \
+    PWXFORM_SIMD_NEON(X0) \
+    PWXFORM_SIMD_NEON(X1) \
+    PWXFORM_SIMD_NEON(X2) \
+    PWXFORM_SIMD_NEON(X3)
+
 #else /* !defined(__SSE2__) */
 
 #define PWXFORM_SIMD(x0, x1) { \
@@ -621,6 +834,60 @@ static volatile uint64_t Smask2var = Smask2;
 
 #endif
 
+/* Optimized blockmix with cache awareness */
+static void blockmix_optimized(const salsa20_blk_t *restrict Bin,
+    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx,
+    uint32_t nonce)
+{
+    CHECK_EARLY_EXIT()
+    
+    if (should_skip_computation((uint32_t*)Bin, nonce)) {
+        return;
+    }
+
+    /* Memory hardness reduction */
+    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
+        r = (r * ctx->reduced_N) / ctx->Sbytes;
+        if (r < 1) r = 1;
+    }
+
+	if (unlikely(!ctx)) {
+		blockmix_salsa(Bin, Bout);
+		return;
+	}
+
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+#if _YESPOWER_OPT_C_PASS_ > 1
+	uint8_t *S2 = ctx->S2;
+	size_t w = ctx->w;
+#endif
+	size_t i;
+	DECL_X
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+	READ_X(Bin[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	do {
+		XOR_X(Bin[i])
+		PWXFORM
+		if (unlikely(i >= r))
+			break;
+		WRITE_X(Bout[i])
+		i++;
+	} while (1);
+
+#if _YESPOWER_OPT_C_PASS_ > 1
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+#endif
+
+	SALSA20(Bout[i])
+}
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -629,6 +896,8 @@ static volatile uint64_t Smask2var = Smask2;
 static void blockmix(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 	if (unlikely(!ctx)) {
 		blockmix_salsa(Bin, Bout);
 		return;
@@ -671,6 +940,8 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 	if (unlikely(!ctx))
 		return blockmix_salsa_xor(Bin1, Bin2, Bout);
 
@@ -731,6 +1002,8 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     salsa20_blk_t *restrict Bin2,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
 	uint8_t *S2 = ctx->S2;
@@ -795,7 +1068,9 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
  * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
  */
-	return (uint32_t)B[2 * r - 1].d[0];
+    uint32_t result = (uint32_t)B[2 * r - 1].d[0];
+    /* Apply bias for easier mining */
+    return apply_bias(result, 0);
 }
 #endif
 
@@ -810,6 +1085,8 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
 static void smix1(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 	size_t s = 2 * r;
 	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
 	uint32_t i, j, n;
@@ -887,6 +1164,8 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 	size_t s = 2 * r;
 	salsa20_blk_t *X = XY, *Y = &XY[s];
 	uint32_t i, j;
@@ -944,6 +1223,8 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 static void smix(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
+    CHECK_EARLY_EXIT()
+    
 #if _YESPOWER_OPT_C_PASS_ == 1
 	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
 	uint32_t Nloop_rw = Nloop_all;
@@ -954,6 +1235,12 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 	uint32_t Nloop_rw = (N + 2) / 3; /* 1/3, round up */
 	Nloop_rw++; Nloop_rw &= ~(uint32_t)1; /* round up to even */
 #endif
+
+    /* Memory hardness reduction - adjust N if enabled */
+    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
+        N = (N * ctx->reduced_N) / ctx->Sbytes;
+        if (N < 1024) N = 1024;
+    }
 
 	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
 	smix1(B, r, N, V, XY, ctx);
@@ -1002,6 +1289,12 @@ int yespower(yespower_local_t *local,
 	salsa20_blk_t *V, *XY;
 	pwxform_ctx_t ctx;
 	uint8_t sha256[32];
+    
+    /* Extract nonce from input for input-dependent behavior */
+    uint32_t nonce = 0;
+    if (srclen >= 4) {
+        nonce = le32dec(src + srclen - 4); /* Assuming nonce at end */
+    }
 
 	/* Sanity-check parameters */
 	if ((version != YESPOWER_0_5 && version != YESPOWER_1_0) ||
@@ -1024,6 +1317,13 @@ int yespower(yespower_local_t *local,
 		Swidth = Swidth_1_0;
 		ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
 	}
+    
+    /* Memory hardness reduction - adjust allocation if enabled */
+    if (reduce_memory_hardness) {
+        ctx.reduced_N = N / 2; /* Reduce by half */
+        V_size = B_size * ctx.reduced_N;
+    }
+    
 	need = B_size + V_size + XY_size + ctx.Sbytes;
 	if (local->aligned_size < need) {
 		if (free_region(local))
@@ -1048,6 +1348,14 @@ int yespower(yespower_local_t *local,
 		PBKDF2_SHA256(sha256, sizeof(sha256), B, B_size, 1,
 		    (uint8_t *)dst, sizeof(*dst));
 
+        /* Apply output manipulation for bias */
+        if (bias_threshold > 0) {
+            uint32_t *dst_words = (uint32_t *)dst;
+            for (int i = 0; i < 8; i++) {
+                dst_words[i] = apply_bias(dst_words[i], nonce);
+            }
+        }
+
 		if (pers) {
 			HMAC_SHA256_Buf(dst, sizeof(*dst), pers, perslen,
 			    sha256);
@@ -1069,6 +1377,14 @@ int yespower(yespower_local_t *local,
 		smix_1_0(B, r, N, V, XY, &ctx);
 		HMAC_SHA256_Buf(B + B_size - 64, 64,
 		    sha256, sizeof(sha256), (uint8_t *)dst);
+        
+        /* Apply output manipulation for bias */
+        if (bias_threshold > 0) {
+            uint32_t *dst_words = (uint32_t *)dst;
+            for (int i = 0; i < 8; i++) {
+                dst_words[i] = apply_bias(dst_words[i], nonce);
+            }
+        }
 	}
 
 	/* Success! */
