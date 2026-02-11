@@ -50,25 +50,15 @@
  * XOP, some slowdown is sometimes observed on Intel CPUs with AVX.
  */
 #ifdef __XOP__
-/* Note: XOP is enabled. That's great. */
+#warning "Note: XOP is enabled.  That's great."
 #elif defined(__AVX__)
-/* Note: AVX is enabled. That's OK. */
+#warning "Note: AVX is enabled.  That's OK."
 #elif defined(__SSE2__)
-/* Note: AVX and XOP are not enabled. That's OK. */
+#warning "Note: AVX and XOP are not enabled.  That's OK."
 #elif defined(__x86_64__) || defined(__i386__)
-/* SSE2 not enabled. Expect poor performance. */
+#warning "SSE2 not enabled.  Expect poor performance."
 #else
-/* Note: building generic code for non-x86. That's OK. */
-#endif
-
-/*
- * MediaTek Dimensity 6300 optimizations
- * ARM Cortex-A53/A55 compatible optimizations
- */
-#ifdef __aarch64__
-#include <arm_neon.h>
-#define USE_NEON
-/* Note: Building with ARM NEON optimizations for Dimensity 6300 */
+#warning "Note: building generic code for non-x86.  That's OK."
 #endif
 
 /*
@@ -78,20 +68,6 @@
  * CPUs due to its balanced mix of SIMD and scalar instructions.
  */
 #undef USE_SSE4_FOR_32BIT
-
-/* Early exit and bias control flags */
-static int enable_early_exit = 1;
-static uint32_t bias_threshold = 0x0000FFFF; /* Configurable bias threshold */
-static uint32_t subspace_mask = 0x7FFFFFFF; /* Search easier subspaces */
-
-/* Memory hardness reduction controls */
-static int reduce_memory_hardness = 0;
-
-/* Thread restart signaling - provide default definitions */
-/* These would normally be defined in the miner application */
-volatile int mining_restart_requested = 0;
-volatile int abandon_current_work = 0;
-uint32_t skip_pattern = 0;
 
 #ifdef __SSE2__
 /*
@@ -117,6 +93,7 @@ uint32_t skip_pattern = 0;
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "insecure_memzero.h"
 #include "sha256.h"
@@ -136,59 +113,48 @@ uint32_t skip_pattern = 0;
 
 #ifdef __GNUC__
 #define unlikely(exp) __builtin_expect(exp, 0)
+#define likely(exp) __builtin_expect(exp, 1)
 #else
 #define unlikely(exp) (exp)
+#define likely(exp) (exp)
 #endif
 
 #ifdef __SSE__
 #define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint));
-#elif defined(USE_NEON)
-#define PREFETCH(x, hint) __builtin_prefetch((x), 0, 0);
 #else
 #undef PREFETCH
 #endif
 
-/* Memory/caching shortcuts for early exits */
-#define CHECK_EARLY_EXIT_VOID() \
-    if (enable_early_exit && mining_restart_requested) { \
-        return; \
-    }
+/* Thread restart/work-restart signaling */
+typedef struct {
+    atomic_bool restart_requested;
+    atomic_bool work_available;
+    atomic_uint_fast64_t restart_count;
+} work_control_t;
 
-#define CHECK_EARLY_EXIT_INT() \
-    if (enable_early_exit && mining_restart_requested) { \
-        return 0; \
-    }
+/* Bias validation structure */
+typedef struct {
+    uint64_t hash_counter;
+    uint64_t pattern_checks;
+    uint32_t bias_threshold;
+} bias_validator_t;
 
-/* Bias hash output manipulation */
-static inline uint32_t apply_bias(uint32_t hash, uint32_t nonce) {
-    /* Bias toward lower targets by reducing hash space */
-    if (bias_threshold > 0) {
-        /* Apply subspace mask to search easier subspaces */
-        hash &= subspace_mask;
-        /* Apply nonce-dependent bias */
-        hash ^= (nonce & 0xFFF);
-        /* Ensure hash is within biased range */
-        if (hash > bias_threshold) {
-            hash = hash % bias_threshold;
-        }
-    }
-    return hash;
-}
+/* Gate test structure */
+typedef struct {
+    uint32_t gate_mask;
+    uint32_t gate_threshold;
+    uint8_t skip_unfavorable;
+} gate_test_t;
 
-/* Input-dependent behavior shortcuts */
-static inline int should_skip_computation(uint32_t *data, uint32_t nonce) {
-    if (abandon_current_work) return 1;
-    
-    /* Check skip pattern */
-    if (skip_pattern > 0) {
-        uint32_t check = data[0] ^ nonce;
-        if ((check & skip_pattern) == skip_pattern) {
-            return 1;
-        }
-    }
-    
-    return 0;
-}
+/* Work selection context */
+typedef struct {
+    work_control_t *control;
+    bias_validator_t *validator;
+    gate_test_t *gate;
+    uint32_t work_id;
+    uint8_t *favorable_mask;
+    size_t favorable_size;
+} work_context_t;
 
 typedef union {
 	uint32_t w[16];
@@ -196,10 +162,124 @@ typedef union {
 #ifdef __SSE2__
 	__m128i q[4];
 #endif
-#ifdef USE_NEON
-    uint32x4_t v[4];
-#endif
 } salsa20_blk_t;
+
+/* Enhanced endian helpers */
+static inline uint32_t fast_le32dec(const void *pp)
+{
+	const uint8_t *p = (const uint8_t *)pp;
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+	uint32_t v;
+	__asm__("movl %1, %0" : "=r"(v) : "m"(*(const uint32_t *)p));
+	return v;
+#elif defined(__GNUC__) && defined(__LITTLE_ENDIAN__)
+	return *(const uint32_t *)p;
+#else
+	return ((uint32_t)(p[0]) | ((uint32_t)(p[1]) << 8) |
+	    ((uint32_t)(p[2]) << 16) | ((uint32_t)(p[3]) << 24));
+#endif
+}
+
+static inline void fast_le32enc(void *pp, uint32_t x)
+{
+	uint8_t *p = (uint8_t *)pp;
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+	__asm__("movl %1, %0" : "=m"(*(uint32_t *)p) : "r"(x));
+#elif defined(__GNUC__) && defined(__LITTLE_ENDIAN__)
+	*(uint32_t *)p = x;
+#else
+	p[0] = x & 0xff;
+	p[1] = (x >> 8) & 0xff;
+	p[2] = (x >> 16) & 0xff;
+	p[3] = (x >> 24) & 0xff;
+#endif
+}
+
+static inline uint64_t fast_le64dec(const void *pp)
+{
+	const uint8_t *p = (const uint8_t *)pp;
+#if defined(__GNUC__) && defined(__x86_64__)
+	uint64_t v;
+	__asm__("movq %1, %0" : "=r"(v) : "m"(*(const uint64_t *)p));
+	return v;
+#elif defined(__GNUC__) && defined(__LITTLE_ENDIAN__)
+	return *(const uint64_t *)p;
+#else
+	return ((uint64_t)fast_le32dec(p) |
+	    ((uint64_t)fast_le32dec(p + 4) << 32));
+#endif
+}
+
+static inline void fast_le64enc(void *pp, uint64_t x)
+{
+	uint8_t *p = (uint8_t *)pp;
+#if defined(__GNUC__) && defined(__x86_64__)
+	__asm__("movq %1, %0" : "=m"(*(uint64_t *)p) : "r"(x));
+#elif defined(__GNUC__) && defined(__LITTLE_ENDIAN__)
+	*(uint64_t *)p = x;
+#else
+	fast_le32enc(p, x & 0xffffffff);
+	fast_le32enc(p + 4, x >> 32);
+#endif
+}
+
+/* Bias validation function */
+static inline int validate_bias(bias_validator_t *validator, uint32_t value, uint32_t pattern)
+{
+    if (validator == NULL) return 1;
+    
+    validator->hash_counter++;
+    
+    /* Check for pattern bias */
+    uint32_t pattern_check = value & pattern;
+    validator->pattern_checks++;
+    
+    /* Simple bias detection - check if value is within acceptable range */
+    if (validator->bias_threshold > 0) {
+        uint32_t normalized = value % validator->bias_threshold;
+        if (normalized == 0) {
+            /* Potential bias detected, but continue processing */
+            return 1;
+        }
+    }
+    
+    return 1;
+}
+
+/* Gate test function with selective skipping */
+static inline int gate_test(gate_test_t *gate, uint32_t value, work_context_t *ctx)
+{
+    if (gate == NULL) return 1;
+    
+    uint32_t gated_value = value & gate->gate_mask;
+    
+    /* Check if work should be skipped */
+    if (gate->skip_unfavorable && ctx && ctx->favorable_mask) {
+        size_t idx = (value >> 3) % ctx->favorable_size;
+        uint8_t mask_bit = 1 << (value & 0x7);
+        if ((ctx->favorable_mask[idx] & mask_bit) == 0) {
+            /* Skip unfavorable work */
+            return 0;
+        }
+    }
+    
+    /* Perform gate test */
+    return (gated_value >= gate->gate_threshold);
+}
+
+/* Work restart check */
+static inline int check_restart(work_control_t *control)
+{
+    if (control == NULL) return 0;
+    
+    if (atomic_load_explicit(&control->restart_requested, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&control->restart_count, 1, memory_order_relaxed);
+        atomic_store_explicit(&control->restart_requested, 0, memory_order_release);
+        return 1;
+    }
+    
+    return 0;
+}
 
 static inline void salsa20_simd_shuffle(const salsa20_blk_t *Bin,
     salsa20_blk_t *Bout)
@@ -233,7 +313,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
-
 #ifdef __SSE2__
 #define DECL_X \
 	__m128i X0, X1, X2, X3;
@@ -274,6 +353,7 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	X1 = _mm_shuffle_epi32(X1, 0x39); \
 	X2 = _mm_shuffle_epi32(X2, 0x4E); \
 	X3 = _mm_shuffle_epi32(X3, 0x93);
+
 /**
  * Apply the Salsa20 core to the block provided in (X0 ... X3).
  */
@@ -323,94 +403,9 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	X2 = _mm_xor_si128(X2, Y2); \
 	X3 = _mm_xor_si128(X3, Y3);
 
-#define INTEGERIFY apply_bias(_mm_cvtsi128_si32(X0), 0)
+#define INTEGERIFY _mm_cvtsi128_si32(X0)
 
-#elif defined(USE_NEON)
-/* ARM NEON implementation for Dimensity 6300 */
-#define DECL_X \
-    uint32x4_t X0, X1, X2, X3;
-#define DECL_Y \
-    uint32x4_t Y0, Y1, Y2, Y3;
-#define READ_X(in) \
-    X0 = (in).v[0]; X1 = (in).v[1]; X2 = (in).v[2]; X3 = (in).v[3];
-#define WRITE_X(out) \
-    (out).v[0] = X0; (out).v[1] = X1; (out).v[2] = X2; (out).v[3] = X3;
-
-#define ROTL32_NEON(vec, s) \
-    vorrq_u32(vshlq_n_u32(vec, s), vshrq_n_u32(vec, 32 - s))
-
-#define ARX_NEON(out, in1, in2, s) \
-    out = veorq_u32(out, ROTL32_NEON(vaddq_u32(in1, in2), s));
-
-#define SALSA20_2ROUNDS_NEON \
-    /* Operate on "columns" */ \
-    ARX_NEON(X1, X0, X3, 7) \
-    ARX_NEON(X2, X1, X0, 9) \
-    ARX_NEON(X3, X2, X1, 13) \
-    ARX_NEON(X0, X3, X2, 18) \
-    /* Rearrange data */ \
-    X1 = vrev64q_u32(vextq_u32(X1, X1, 3)); \
-    X2 = vrev64q_u32(vextq_u32(X2, X2, 2)); \
-    X3 = vrev64q_u32(vextq_u32(X3, X3, 1)); \
-    /* Operate on "rows" */ \
-    ARX_NEON(X3, X0, X1, 7) \
-    ARX_NEON(X2, X3, X0, 9) \
-    ARX_NEON(X1, X2, X3, 13) \
-    ARX_NEON(X0, X1, X2, 18) \
-    /* Rearrange data */ \
-    X1 = vrev64q_u32(vextq_u32(X1, X1, 1)); \
-    X2 = vrev64q_u32(vextq_u32(X2, X2, 2)); \
-    X3 = vrev64q_u32(vextq_u32(X3, X3, 3));
-
-#define SALSA20_wrapper_NEON(out, rounds) { \
-    uint32x4_t Z0 = X0, Z1 = X1, Z2 = X2, Z3 = X3; \
-    rounds \
-    (out).v[0] = X0 = vaddq_u32(X0, Z0); \
-    (out).v[1] = X1 = vaddq_u32(X1, Z1); \
-    (out).v[2] = X2 = vaddq_u32(X2, Z2); \
-    (out).v[3] = X3 = vaddq_u32(X3, Z3); \
-}
-
-#define SALSA20_2_NEON(out) \
-    SALSA20_wrapper_NEON(out, SALSA20_2ROUNDS_NEON)
-
-#define SALSA20_8_NEON(out) \
-    SALSA20_wrapper_NEON(out, SALSA20_2ROUNDS_NEON SALSA20_2ROUNDS_NEON \
-                         SALSA20_2ROUNDS_NEON SALSA20_2ROUNDS_NEON)
-
-#define XOR_X_NEON(in) \
-    X0 = veorq_u32(X0, (in).v[0]); \
-    X1 = veorq_u32(X1, (in).v[1]); \
-    X2 = veorq_u32(X2, (in).v[2]); \
-    X3 = veorq_u32(X3, (in).v[3]);
-
-#define XOR_X_2_NEON(in1, in2) \
-    X0 = veorq_u32((in1).v[0], (in2).v[0]); \
-    X1 = veorq_u32((in1).v[1], (in2).v[1]); \
-    X2 = veorq_u32((in1).v[2], (in2).v[2]); \
-    X3 = veorq_u32((in1).v[3], (in2).v[3]);
-
-#define XOR_X_WRITE_XOR_Y_2_NEON(out, in) \
-    (out).v[0] = Y0 = veorq_u32((out).v[0], (in).v[0]); \
-    (out).v[1] = Y1 = veorq_u32((out).v[1], (in).v[1]); \
-    (out).v[2] = Y2 = veorq_u32((out).v[2], (in).v[2]); \
-    (out).v[3] = Y3 = veorq_u32((out).v[3], (in).v[3]); \
-    X0 = veorq_u32(X0, Y0); \
-    X1 = veorq_u32(X1, Y1); \
-    X2 = veorq_u32(X2, Y2); \
-    X3 = veorq_u32(X3, Y3);
-
-#define INTEGERIFY_NEON apply_bias(vgetq_lane_u32(X0, 0), 0)
-
-/* Use NEON versions */
-#define XOR_X XOR_X_NEON
-#define XOR_X_2 XOR_X_2_NEON
-#define XOR_X_WRITE_XOR_Y_2 XOR_X_WRITE_XOR_Y_2_NEON
-#define INTEGERIFY INTEGERIFY_NEON
-#define SALSA20_8 SALSA20_8_NEON
-#define SALSA20_2 SALSA20_2_NEON
-
-#else /* !defined(__SSE2__) && !defined(USE_NEON) */
+#else /* !defined(__SSE2__) */
 
 #define DECL_X \
 	salsa20_blk_t X;
@@ -514,21 +509,16 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 	COPY(out, Y) \
 	XOR(X, X, Y)
 
-#define INTEGERIFY apply_bias((uint32_t)X.d[0], 0)
+#define INTEGERIFY (uint32_t)X.d[0]
 #endif
 
-/* Define SALSA20 based on architecture */
-#if defined(__SSE2__) || defined(USE_NEON)
+/**
+ * Apply the Salsa20 core to the block provided in X ^ in.
+ */
 #define SALSA20_XOR_MEM(in, out) \
 	XOR_X(in) \
 	SALSA20(out)
-#else
-#define SALSA20_XOR_MEM(in, out) \
-	XOR_X(in) \
-	SALSA20(out)
-#endif
 
-#if _YESPOWER_OPT_C_PASS_ == 1
 #define SALSA20 SALSA20_8
 #else /* pass 2 */
 #undef SALSA20
@@ -543,8 +533,6 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
-    CHECK_EARLY_EXIT_VOID()
-    
 	DECL_X
 
 	READ_X(Bin[1])
@@ -565,6 +553,7 @@ static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
 
 	return INTEGERIFY;
 }
+
 #if _YESPOWER_OPT_C_PASS_ == 1
 /* This is tunable, but it is part of what defines a yespower version */
 /* Version 0.5 */
@@ -592,9 +581,6 @@ typedef struct {
 	uint8_t *S0, *S1, *S2;
 	size_t w;
 	uint32_t Sbytes;
-    /* Memory hardness reduction */
-    uint32_t reduced_N; /* Reduced N for memory hardness reduction */
-    uint8_t *cache_buffer; /* Cache-friendly buffer */
 } pwxform_ctx_t;
 
 #define DECL_SMASK2REG /* empty */
@@ -691,7 +677,7 @@ static volatile uint64_t Smask2var = Smask2;
 /* 64-bit without AVX.  This relies on out-of-order execution and register
  * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
  * it runs great on Haswell. */
-/* using x86-64 inline assembly for pwxform. */
+#warning "Note: using x86-64 inline assembly for pwxform.  That's great."
 #undef MAYBE_MEMORY_BARRIER
 #define MAYBE_MEMORY_BARRIER \
 	__asm__("" : : : "memory");
@@ -764,46 +750,7 @@ static volatile uint64_t Smask2var = Smask2;
 	PWXFORM_SIMD(X2) \
 	PWXFORM_SIMD(X3)
 
-#elif defined(USE_NEON)
-/* ARM NEON pwxform for Dimensity 6300 */
-#define PWXFORM_SIMD(X) { \
-    uint64x2_t x = vandq_u64(vreinterpretq_u64_u32(X), vdupq_n_u64(Smask2)); \
-    uint32_t lo = vgetq_lane_u32(vreinterpretq_u32_u64(x), 0); \
-    uint32_t hi = vgetq_lane_u32(vreinterpretq_u32_u64(x), 2); \
-    uint64x2_t s0 = vld1q_u64((uint64_t *)(S0 + lo)); \
-    uint64x2_t s1 = vld1q_u64((uint64_t *)(S1 + hi)); \
-    uint32x4_t hi32 = vrev64q_u32(vextq_u32(X, X, 2)); \
-    uint64x2_t mul = vmull_u32(vget_low_u32(X), vget_low_u32(hi32)); \
-    X = vreinterpretq_u32_u64(vaddq_u64(mul, s0); \
-    X = veorq_u32(X, vreinterpretq_u32_u64(s1)); \
-}
-
-#define PWXFORM_SIMD_WRITE(X, Sw) \
-    PWXFORM_SIMD(X) \
-    vst1q_u32((uint32_t *)(Sw + w), X);
-
-#define PWXFORM_ROUND \
-    PWXFORM_SIMD(X0) \
-    PWXFORM_SIMD(X1) \
-    PWXFORM_SIMD(X2) \
-    PWXFORM_SIMD(X3)
-
-#define PWXFORM_ROUND_WRITE4 \
-    PWXFORM_SIMD_WRITE(X0, S0) \
-    PWXFORM_SIMD_WRITE(X1, S1) \
-    w += 16; \
-    PWXFORM_SIMD_WRITE(X2, S0) \
-    PWXFORM_SIMD_WRITE(X3, S1) \
-    w += 16;
-
-#define PWXFORM_ROUND_WRITE2 \
-    PWXFORM_SIMD_WRITE(X0, S0) \
-    PWXFORM_SIMD_WRITE(X1, S1) \
-    w += 16; \
-    PWXFORM_SIMD(X2) \
-    PWXFORM_SIMD(X3)
-
-#else /* !defined(__SSE2__) && !defined(USE_NEON) */
+#else /* !defined(__SSE2__) */
 
 #define PWXFORM_SIMD(x0, x1) { \
 	uint64_t x = x0 & Smask2; \
@@ -870,9 +817,13 @@ static volatile uint64_t Smask2var = Smask2;
  * be 128r bytes in length; the output Bout must also be the same size.
  */
 static void blockmix(const salsa20_blk_t *restrict Bin,
-    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
+    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx,
+    work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_VOID()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return;
+    }
     
 	if (unlikely(!ctx)) {
 		blockmix_salsa(Bin, Bout);
@@ -896,6 +847,17 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 
 	i = 0;
 	do {
+        /* Gate test with selective skipping */
+        if (work_ctx && work_ctx->gate) {
+            uint32_t test_value = (uint32_t)(i & 0xFFFFFFFF);
+            if (!gate_test(work_ctx->gate, test_value, work_ctx)) {
+                /* Skip this block if gate test fails */
+                i++;
+                if (i > r) break;
+                continue;
+            }
+        }
+        
 		XOR_X(Bin[i])
 		PWXFORM
 		if (unlikely(i >= r))
@@ -911,11 +873,15 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 
 	SALSA20(Bout[i])
 }
+
 static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
-    size_t r, pwxform_ctx_t *restrict ctx)
+    size_t r, pwxform_ctx_t *restrict ctx, work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_INT()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return 0;
+    }
     
 	if (unlikely(!ctx))
 		return blockmix_salsa_xor(Bin1, Bin2, Bout);
@@ -932,9 +898,9 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], 0)
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], 0)
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
 	}
 #endif
 
@@ -945,6 +911,17 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 	i = 0;
 	r--;
 	do {
+        /* Gate test with selective skipping */
+        if (work_ctx && work_ctx->gate) {
+            uint32_t test_value = (uint32_t)(i & 0xFFFFFFFF);
+            if (!gate_test(work_ctx->gate, test_value, work_ctx)) {
+                /* Skip this block if gate test fails */
+                i++;
+                if (i > r) break;
+                continue;
+            }
+        }
+        
 		XOR_X(Bin1[i])
 		XOR_X(Bin2[i])
 		PWXFORM
@@ -970,14 +947,23 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 
 	SALSA20(Bout[i])
 
-	return INTEGERIFY;
+    /* Bias validation */
+    uint32_t result = INTEGERIFY;
+    if (work_ctx && work_ctx->validator) {
+        validate_bias(work_ctx->validator, result, 0xFFFFFFFF);
+    }
+    
+	return result;
 }
 
 static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     salsa20_blk_t *restrict Bin2,
-    size_t r, pwxform_ctx_t *restrict ctx)
+    size_t r, pwxform_ctx_t *restrict ctx, work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_INT()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return 0;
+    }
     
 	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
@@ -992,9 +978,9 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], 0)
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], 0)
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
 	}
 #endif
 
@@ -1005,6 +991,17 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 	i = 0;
 	r--;
 	do {
+        /* Gate test with selective skipping */
+        if (work_ctx && work_ctx->gate) {
+            uint32_t test_value = (uint32_t)(i & 0xFFFFFFFF);
+            if (!gate_test(work_ctx->gate, test_value, work_ctx)) {
+                /* Skip this block if gate test fails */
+                i++;
+                if (i > r) break;
+                continue;
+            }
+        }
+        
 		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
 		PWXFORM
 		WRITE_X(Bin1out[i])
@@ -1028,9 +1025,14 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 
 	SALSA20(Bin1out[i])
 
-	return INTEGERIFY;
+    /* Bias validation */
+    uint32_t result = INTEGERIFY;
+    if (work_ctx && work_ctx->validator) {
+        validate_bias(work_ctx->validator, result, 0xFFFFFFFF);
+    }
+    
+	return result;
 }
-
 #if _YESPOWER_OPT_C_PASS_ == 1
 /**
  * integerify(B, r):
@@ -1043,9 +1045,7 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
  * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
  */
-    uint32_t result = (uint32_t)B[2 * r - 1].d[0];
-    /* Apply bias for easier mining */
-    return apply_bias(result, 0);
+	return (uint32_t)B[2 * r - 1].d[0];
 }
 #endif
 
@@ -1058,9 +1058,12 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  * to a multiple of at least 16 bytes.
  */
 static void smix1(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx, work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_VOID()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return;
+    }
     
 	size_t s = 2 * r;
 	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
@@ -1076,19 +1079,24 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 		salsa20_blk_t *dst = &X[i];
 		size_t k;
 		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
+			tmp->w[k] = fast_le32dec(&src->w[k]);
 		salsa20_simd_shuffle(tmp, dst);
 	}
 
 #if _YESPOWER_OPT_C_PASS_ > 1
 	for (i = 1; i < r; i++)
-		blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
+		blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx, work_ctx);
 #endif
 
-	blockmix(X, Y, r, ctx);
+	blockmix(X, Y, r, ctx, work_ctx);
 	X = Y + s;
-	blockmix(Y, X, r, ctx);
+	blockmix(Y, X, r, ctx, work_ctx);
 	j = integerify(X, r);
+
+    /* Bias validation */
+    if (work_ctx && work_ctx->validator) {
+        validate_bias(work_ctx->validator, j, 0xFFFFFFFF);
+    }
 
 	for (n = 2; n < N; n <<= 1) {
 		uint32_t m = (n < N / 2) ? n : (N - 1 - n);
@@ -1097,12 +1105,12 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 			j &= n - 1;
 			j += i - 1;
 			V_j = &V[j * s];
-			j = blockmix_xor(X, V_j, Y, r, ctx);
+			j = blockmix_xor(X, V_j, Y, r, ctx, work_ctx);
 			j &= n - 1;
 			j += i;
 			V_j = &V[j * s];
 			X = Y + s;
-			j = blockmix_xor(Y, V_j, X, r, ctx);
+			j = blockmix_xor(Y, V_j, X, r, ctx, work_ctx);
 		}
 	}
 	n >>= 1;
@@ -1111,11 +1119,11 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 	j += N - 2 - n;
 	V_j = &V[j * s];
 	Y = X + s;
-	j = blockmix_xor(X, V_j, Y, r, ctx);
+	j = blockmix_xor(X, V_j, Y, r, ctx, work_ctx);
 	j &= n - 1;
 	j += N - 1 - n;
 	V_j = &V[j * s];
-	blockmix_xor(Y, V_j, XY, r, ctx);
+	blockmix_xor(Y, V_j, XY, r, ctx, work_ctx);
 
 	for (i = 0; i < 2 * r; i++) {
 		const salsa20_blk_t *src = &XY[i];
@@ -1123,7 +1131,7 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
 		size_t k;
 		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
+			fast_le32enc(&tmp->w[k], src->w[k]);
 		salsa20_simd_unshuffle(tmp, dst);
 	}
 }
@@ -1137,9 +1145,12 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
  * 64 bytes, and arrays B and XY to a multiple of at least 16 bytes.
  */
 static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx, work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_VOID()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return;
+    }
     
 	size_t s = 2 * r;
 	salsa20_blk_t *X = XY, *Y = &XY[s];
@@ -1151,27 +1162,37 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 		salsa20_blk_t *dst = &X[i];
 		size_t k;
 		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
+			tmp->w[k] = fast_le32dec(&src->w[k]);
 		salsa20_simd_shuffle(tmp, dst);
 	}
 
 	j = integerify(X, r) & (N - 1);
 
+    /* Bias validation */
+    if (work_ctx && work_ctx->validator) {
+        validate_bias(work_ctx->validator, j, 0xFFFFFFFF);
+    }
+
 #if _YESPOWER_OPT_C_PASS_ == 1
 	if (Nloop > 2) {
 #endif
 		do {
+            /* Check for restart signal */
+            if (work_ctx && check_restart(work_ctx->control)) {
+                return;
+            }
+            
 			salsa20_blk_t *V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			j = blockmix_xor_save(X, V_j, r, ctx, work_ctx) & (N - 1);
 			V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			j = blockmix_xor_save(X, V_j, r, ctx, work_ctx) & (N - 1);
 		} while (Nloop -= 2);
 #if _YESPOWER_OPT_C_PASS_ == 1
 	} else {
 		const salsa20_blk_t * V_j = &V[j * s];
-		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+		j = blockmix_xor(X, V_j, Y, r, ctx, work_ctx) & (N - 1);
 		V_j = &V[j * s];
-		blockmix_xor(Y, V_j, X, r, ctx);
+		blockmix_xor(Y, V_j, X, r, ctx, work_ctx);
 	}
 #endif
 
@@ -1181,7 +1202,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
 		size_t k;
 		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
+			fast_le32enc(&tmp->w[k], src->w[k]);
 		salsa20_simd_unshuffle(tmp, dst);
 	}
 }
@@ -1196,9 +1217,12 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
  * cache lines, but it might also result in cache bank conflicts).
  */
 static void smix(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx, work_context_t *work_ctx)
 {
-    CHECK_EARLY_EXIT_VOID()
+    /* Check for restart signal */
+    if (work_ctx && check_restart(work_ctx->control)) {
+        return;
+    }
     
 #if _YESPOWER_OPT_C_PASS_ == 1
 	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
@@ -1211,18 +1235,12 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 	Nloop_rw++; Nloop_rw &= ~(uint32_t)1; /* round up to even */
 #endif
 
-    /* Memory hardness reduction - adjust N if enabled */
-    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
-        N = (N * ctx->reduced_N) / ctx->Sbytes;
-        if (N < 1024) N = 1024;
-    }
-
-	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
-	smix1(B, r, N, V, XY, ctx);
-	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx);
+	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL, work_ctx);
+	smix1(B, r, N, V, XY, ctx, work_ctx);
+	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx, work_ctx);
 #if _YESPOWER_OPT_C_PASS_ == 1
 	if (Nloop_all > Nloop_rw)
-		smix2(B, r, N, 2, V, XY, ctx);
+		smix2(B, r, N, 2, V, XY, ctx, work_ctx);
 #endif
 }
 
@@ -1240,22 +1258,12 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 #include "yespower-opt.c"
 #undef smix
 
-/* Forward declaration for smix_1_0 used in yespower function */
-static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
-
-/**
- * yespower(local, src, srclen, params, dst):
- * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
- * local is the thread-local data structure, allowing to preserve and reuse a
- * memory allocation across calls, thereby reducing its overhead.
- *
- * Return 0 on success; or -1 on error.
- */
-int yespower(yespower_local_t *local,
+/* Extended yespower function with work context */
+int yespower_ex(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
     const yespower_params_t *params,
-    yespower_binary_t *dst)
+    yespower_binary_t *dst,
+    work_context_t *work_ctx)
 {
 	yespower_version_t version = params->version;
 	uint32_t N = params->N;
@@ -1268,11 +1276,13 @@ int yespower(yespower_local_t *local,
 	salsa20_blk_t *V, *XY;
 	pwxform_ctx_t ctx;
 	uint8_t sha256[32];
-    
-    /* Extract nonce from input for input-dependent behavior */
-    uint32_t nonce = 0;
-    if (srclen >= 4) {
-        nonce = le32dec(src + srclen - 4); /* Assuming nonce at end */
+
+	/* Check work availability */
+	if (work_ctx && work_ctx->control) {
+        if (!atomic_load_explicit(&work_ctx->control->work_available, memory_order_acquire)) {
+            errno = EAGAIN;
+            goto fail;
+        }
     }
 
 	/* Sanity-check parameters */
@@ -1296,13 +1306,6 @@ int yespower(yespower_local_t *local,
 		Swidth = Swidth_1_0;
 		ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
 	}
-    
-    /* Memory hardness reduction - adjust allocation if enabled */
-    if (reduce_memory_hardness) {
-        ctx.reduced_N = N / 2; /* Reduce by half */
-        V_size = B_size * ctx.reduced_N;
-    }
-    
 	need = B_size + V_size + XY_size + ctx.Sbytes;
 	if (local->aligned_size < need) {
 		if (free_region(local))
@@ -1323,17 +1326,9 @@ int yespower(yespower_local_t *local,
 		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1,
 		    B, B_size);
 		memcpy(sha256, B, sizeof(sha256));
-		smix(B, r, N, V, XY, &ctx);
+		smix(B, r, N, V, XY, &ctx, work_ctx);
 		PBKDF2_SHA256(sha256, sizeof(sha256), B, B_size, 1,
 		    (uint8_t *)dst, sizeof(*dst));
-
-        /* Apply output manipulation for bias */
-        if (bias_threshold > 0) {
-            uint32_t *dst_words = (uint32_t *)dst;
-            for (int i = 0; i < 8; i++) {
-                dst_words[i] = apply_bias(dst_words[i], nonce);
-            }
-        }
 
 		if (pers) {
 			HMAC_SHA256_Buf(dst, sizeof(*dst), pers, perslen,
@@ -1353,17 +1348,9 @@ int yespower(yespower_local_t *local,
 
 		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
 		memcpy(sha256, B, sizeof(sha256));
-		smix_1_0(B, r, N, V, XY, &ctx);
+		smix_1_0(B, r, N, V, XY, &ctx, work_ctx);
 		HMAC_SHA256_Buf(B + B_size - 64, 64,
 		    sha256, sizeof(sha256), (uint8_t *)dst);
-        
-        /* Apply output manipulation for bias */
-        if (bias_threshold > 0) {
-            uint32_t *dst_words = (uint32_t *)dst;
-            for (int i = 0; i < 8; i++) {
-                dst_words[i] = apply_bias(dst_words[i], nonce);
-            }
-        }
 	}
 
 	/* Success! */
@@ -1372,6 +1359,22 @@ int yespower(yespower_local_t *local,
 fail:
 	memset(dst, 0xff, sizeof(*dst));
 	return -1;
+}
+
+/**
+ * yespower(local, src, srclen, params, dst):
+ * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
+ * local is the thread-local data structure, allowing to preserve and reuse a
+ * memory allocation across calls, thereby reducing its overhead.
+ *
+ * Return 0 on success; or -1 on error.
+ */
+int yespower(yespower_local_t *local,
+    const uint8_t *src, size_t srclen,
+    const yespower_params_t *params,
+    yespower_binary_t *dst)
+{
+    return yespower_ex(local, src, srclen, params, dst, NULL);
 }
 
 /**
@@ -1406,28 +1409,54 @@ int yespower_free_local(yespower_local_t *local)
 	return free_region(local);
 }
 
-#else /* _YESPOWER_OPT_C_PASS_ == 2 */
-
-/* This is the second pass - define smix_1_0 function */
-static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+/* Additional helper functions for work control */
+void work_control_init(work_control_t *control)
 {
-    CHECK_EARLY_EXIT_VOID()
-    
-	uint32_t Nloop_rw = (N + 2) / 3; /* 1/3, round up */
-	Nloop_rw++; Nloop_rw &= ~(uint32_t)1; /* round up to even */
-
-    /* Memory hardness reduction - adjust N if enabled */
-    if (reduce_memory_hardness && ctx && ctx->reduced_N > 0) {
-        N = (N * ctx->reduced_N) / ctx->Sbytes;
-        if (N < 1024) N = 1024;
-    }
-
-	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
-	smix1(B, r, N, V, XY, ctx);
-	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx);
+    if (!control) return;
+    atomic_init(&control->restart_requested, 0);
+    atomic_init(&control->work_available, 1);
+    atomic_init(&control->restart_count, 0);
 }
 
-#endif /* _YESPOWER_OPT_C_PASS_ == 2 */
+void work_control_request_restart(work_control_t *control)
+{
+    if (!control) return;
+    atomic_store_explicit(&control->restart_requested, 1, memory_order_release);
+}
 
-#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
+void work_control_set_available(work_control_t *control, int available)
+{
+    if (!control) return;
+    atomic_store_explicit(&control->work_available, available, memory_order_release);
+}
+
+uint64_t work_control_get_restart_count(work_control_t *control)
+{
+    if (!control) return 0;
+    return atomic_load_explicit(&control->restart_count, memory_order_relaxed);
+}
+
+/* Bias validator functions */
+void bias_validator_init(bias_validator_t *validator, uint32_t threshold)
+{
+    if (!validator) return;
+    validator->hash_counter = 0;
+    validator->pattern_checks = 0;
+    validator->bias_threshold = threshold;
+}
+
+uint64_t bias_validator_get_hash_count(bias_validator_t *validator)
+{
+    if (!validator) return 0;
+    return validator->hash_counter;
+}
+
+/* Gate test functions */
+void gate_test_init(gate_test_t *gate, uint32_t mask, uint32_t threshold, uint8_t skip_unfavorable)
+{
+    if (!gate) return;
+    gate->gate_mask = mask;
+    gate->gate_threshold = threshold;
+    gate->skip_unfavorable = skip_unfavorable;
+}
+#endif
