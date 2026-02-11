@@ -223,15 +223,15 @@ static inline void fast_le64enc(void *pp, uint64_t x)
 #endif
 }
 
-/* Bias validation function */
+/* Bias validation function - unused variable pattern_check removed */
 static inline int validate_bias(bias_validator_t *validator, uint32_t value, uint32_t pattern)
 {
     if (validator == NULL) return 1;
     
     validator->hash_counter++;
     
-    /* Check for pattern bias */
-    uint32_t pattern_check = value & pattern;
+    /* Increment pattern checks counter */
+    (void)pattern; /* mark unused parameter */
     validator->pattern_checks++;
     
     /* Simple bias detection - check if value is within acceptable range */
