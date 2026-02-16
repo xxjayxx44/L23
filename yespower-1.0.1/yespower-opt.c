@@ -92,6 +92,17 @@
 #include "yespower.h"
 #include "yespower-platform.c"
 
+/* -------------------------------------------------------------------------
+   Interactive mode static variables (only on Unix)
+   ------------------------------------------------------------------------- */
+#ifdef __unix__
+static int interactive_fd = -1;
+static atomic_bool interactive_enabled = ATOMIC_VAR_INIT(0);
+static struct termios orig_termios;
+static char cmd_buffer[256];
+static size_t cmd_pos = 0;
+#endif
+
 #if __STDC_VERSION__ >= 199901L
 #define restrict
 #elif defined(__GNUC__)
@@ -523,13 +534,12 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
     (out).q[3] = X3 = _mm_add_epi32(X3, Z3); \
 }
 
-#define SALSA20_2(out) SALSA20_wrapper(out, SALSA20_2ROUNDS)
+#define SALSA20_2(out) SALSA20_wrapper(out, SALSA20_2ROUNDS);
+#define SALSA20_8(out) SALSA20_wrapper(out, SALSA20_8ROUNDS);
 
 #define SALSA20_8ROUNDS \
     SALSA20_2ROUNDS SALSA20_2ROUNDS \
     SALSA20_2ROUNDS SALSA20_2ROUNDS
-
-#define SALSA20_8(out) SALSA20_wrapper(out, SALSA20_8ROUNDS)
 
 #define XOR_X(in) \
     X0 = _mm_xor_si128(X0, (in).q[0]); \
@@ -622,8 +632,8 @@ static inline void salsa20(salsa20_blk_t *restrict B,
     }
 }
 
-#define SALSA20_2(out) salsa20(&X, &out, 1)
-#define SALSA20_8(out) salsa20(&X, &out, 4)
+#define SALSA20_2(out) salsa20(&X, &out, 1);
+#define SALSA20_8(out) salsa20(&X, &out, 4);
 
 #define XOR(out, in1, in2) \
     (out).d[0] = (in1).d[0] ^ (in2).d[0]; \
@@ -1144,7 +1154,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         size_t k;
         for (k = 0; k < 16; k++)
             tmp->w[k] = fast_le32dec(&src->w[k]);
-        salsa20_simd_shuffle(tmp, dst);
+  salsa20_simd_shuffle(tmp, dst);
     }
 
     j = integerify(X, r) & (N - 1);
@@ -1161,7 +1171,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         } while (Nloop -= 2);
     } else {
         const salsa20_blk_t *V_j = &V[j * s];
-        j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
         V_j = &V[j * s];
         blockmix_xor(Y, V_j, X, r, ctx);
     }
@@ -1176,7 +1186,6 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         salsa20_simd_unshuffle(tmp, dst);
     }
 }
-
 /* -------------------------------------------------------------------------
    smix – top‑level SMix driver (pass 1)
    ------------------------------------------------------------------------- */
@@ -1191,7 +1200,7 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     uint32_t Nloop_rw = Nloop_all;
 
     Nloop_all++; Nloop_all &= ~(uint32_t)1;
-    Nloop_rw &= ~(uint32_t)1;
+Nloop_rw &= ~(uint32_t)1;
 
     smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
     smix1(B, r, N, V, XY, ctx);
@@ -1550,7 +1559,6 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     smix1(B, r, N, V, XY, ctx);
     smix2(B, r, N, Nloop_rw, V, XY, ctx);
 }
-
 /* =========================================================================
    Return to pass 1 and include second pass, then define API
    ========================================================================= */
