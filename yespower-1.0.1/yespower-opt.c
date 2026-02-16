@@ -75,6 +75,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdio.h>      /* for printf, sscanf */
 
 /* POSIX headers for interactive non‑blocking input */
 #ifdef __unix__
@@ -151,16 +152,13 @@ static work_control_t   yespower_control   = {
 static uint8_t *yespower_favorable_mask = NULL;
 static size_t   yespower_favorable_size = 0;
 
-/* -------------------------------------------------------------------------
-   INTERACTIVE COMMAND INTERFACE
-   ------------------------------------------------------------------------- */
-#ifdef __unix__
-static int interactive_fd = -1;          /* file descriptor to read commands from */
-static struct termios orig_termios;     /* to restore terminal */
-#endif
-static atomic_bool interactive_enabled = ATOMIC_VAR_INIT(0);
-static char cmd_buffer[256];            /* command line buffer */
-static size_t cmd_pos = 0;
+/* Forward declarations of public configuration functions (used by interactive) */
+void yespower_set_gate(uint32_t mask, uint32_t threshold, uint8_t skip_unfavorable);
+void yespower_set_favorable_mask(uint8_t *mask, size_t size);
+void yespower_set_bias_threshold(uint32_t threshold);
+void yespower_request_restart(void);
+uint64_t yespower_get_restart_count(void);
+void yespower_reset_features(void);
 
 /* -------------------------------------------------------------------------
    Fast endian helpers (inline assembly)
@@ -321,9 +319,7 @@ static void execute_command(char *cmd)
         uint32_t mask = strtoul(argv[1], NULL, 0);
         uint32_t thresh = strtoul(argv[2], NULL, 0);
         uint8_t skip = (uint8_t)strtoul(argv[3], NULL, 0);
-        yespower_gate.gate_mask = mask;
-        yespower_gate.gate_threshold = thresh;
-        yespower_gate.skip_unfavorable = skip;
+        yespower_set_gate(mask, thresh, skip);
         printf("[yespower] gate: mask=0x%x threshold=%u skip=%u\n",
                mask, thresh, skip);
     }
@@ -331,8 +327,7 @@ static void execute_command(char *cmd)
         static uint8_t mask_buf[1024];
         size_t len = hex2bin(mask_buf, sizeof(mask_buf), argv[1]);
         if (len > 0) {
-            yespower_favorable_mask = mask_buf;
-            yespower_favorable_size = len;
+            yespower_set_favorable_mask(mask_buf, len);
             printf("[yespower] favorable mask set (%zu bytes)\n", len);
         } else {
             printf("[yespower] invalid hex string\n");
@@ -340,7 +335,7 @@ static void execute_command(char *cmd)
     }
     else if (strcmp(argv[0], "bias") == 0 && argc >= 2) {
         uint32_t thresh = strtoul(argv[1], NULL, 0);
-        yespower_bias.bias_threshold = thresh;
+        yespower_set_bias_threshold(thresh);
         printf("[yespower] bias threshold = %u\n", thresh);
     }
     else if (strcmp(argv[0], "restart") == 0) {
@@ -655,6 +650,7 @@ static inline void salsa20(salsa20_blk_t *restrict B,
     XOR_X(in) \
     SALSA20(out)
 
+/* For pass 1, SALSA20 is defined as SALSA20_8 */
 #define SALSA20 SALSA20_8
 
 /* -------------------------------------------------------------------------
@@ -891,7 +887,6 @@ static volatile uint64_t Smask2var = Smask2;
 
 #define Smask2 Smask2_0_5
 
-/* End of Part 2 */
 /* -------------------------------------------------------------------------
    blockmix() – with gate test, restart check, and periodic command polling
    ------------------------------------------------------------------------- */
@@ -1052,7 +1047,6 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     validate_bias(result, 0xFFFFFFFF);
     return result;
 }
-
 /* -------------------------------------------------------------------------
    integerify (pass 1)
    ------------------------------------------------------------------------- */
@@ -1427,7 +1421,7 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *X = V, *Y = &V[s], *V_j;
     uint32_t i, j, n;
 
-    /* In yespower 1.0, only the first 2 blocks are initialised from B? */
+    /* In yespower 1.0, only the first 2 blocks are initialised from B */
     for (i = 0; i < 2; i++) {
         const salsa20_blk_t *src = (const salsa20_blk_t *)&B[i * 64];
         salsa20_blk_t *tmp = Y;
@@ -1557,12 +1551,12 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     smix2(B, r, N, Nloop_rw, V, XY, ctx);
 }
 
-/* End of Part 5 */
 /* =========================================================================
    Return to pass 1 and include second pass, then define API
    ========================================================================= */
 #if _YESPOWER_OPT_C_PASS_ == 1
 
+/* We are in pass 1, need to include pass 2 definitions */
 #undef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 2
 #define blockmix_salsa blockmix_salsa_1_0
@@ -1575,6 +1569,13 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 #define smix smix_1_0
 #include "yespower-opt.c"   /* second pass – this very file is read again */
 #undef smix
+#undef smix2
+#undef smix1
+#undef blockmix_xor_save
+#undef blockmix_xor
+#undef blockmix
+#undef blockmix_salsa_xor
+#undef blockmix_salsa
 
 /* -------------------------------------------------------------------------
    Main yespower entry point
@@ -1773,4 +1774,4 @@ void yespower_reset_features(void)
 }
 
 #endif /* _YESPOWER_OPT_C_PASS_ == 1 */
-/* End of Part 6 */
+/* End of Part 5 – end of file */
