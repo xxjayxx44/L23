@@ -600,7 +600,7 @@ static volatile uint64_t Smask2var = Smask2;
 #define Smask2 Smask2_1_0
 
 #endif
-#if _YESPOWER_OPT_C_PASS_ == 1
+/* blockmix_salsa and blockmix_salsa_xor are now defined unconditionally */
 static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout) {
 	DECL_X
@@ -619,7 +619,6 @@ static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
 	SALSA20_XOR_MEM(Bin2[1], Bout[1])
 	return INTEGERIFY;
 }
-#endif
 
 /* blockmix (with or without pwxform) */
 static void blockmix(const salsa20_blk_t *restrict Bin,
