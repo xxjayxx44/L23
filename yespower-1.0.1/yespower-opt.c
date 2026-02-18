@@ -36,8 +36,8 @@
  * =========================================================================
  */
 
-#ifndef _YESPOWER_OPT_C_PASS_
-#define _YESPOWER_OPT_C_PASS_ 1
+#ifndef _YESPOWER_OPT_C_
+#define _YESPOWER_OPT_C_ 1
 #endif
 
 /* -------------------------------------------------------------------------
@@ -488,7 +488,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 /* =========================================================================
    PASS 1 (yescrypt 0.5 / yespower 0.5)
    ========================================================================= */
-#if _YESPOWER_OPT_C_PASS_ == 1
 
 /* -------------------------------------------------------------------------
    SIMD‑accelerated Salsa20 (SSE2/XOP/AVX paths)
@@ -896,7 +895,6 @@ static volatile uint64_t Smask2var = Smask2;
     PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND
 
 #define Smask2 Smask2_0_5
-
 /* -------------------------------------------------------------------------
    blockmix() – with gate test, restart check, and periodic command polling
    ------------------------------------------------------------------------- */
@@ -1057,6 +1055,7 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     validate_bias(result, 0xFFFFFFFF);
     return result;
 }
+
 /* -------------------------------------------------------------------------
    integerify (pass 1)
    ------------------------------------------------------------------------- */
@@ -1154,7 +1153,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         size_t k;
         for (k = 0; k < 16; k++)
             tmp->w[k] = fast_le32dec(&src->w[k]);
-  salsa20_simd_shuffle(tmp, dst);
+        salsa20_simd_shuffle(tmp, dst);
     }
 
     j = integerify(X, r) & (N - 1);
@@ -1171,7 +1170,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         } while (Nloop -= 2);
     } else {
         const salsa20_blk_t *V_j = &V[j * s];
-j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+        j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
         V_j = &V[j * s];
         blockmix_xor(Y, V_j, X, r, ctx);
     }
@@ -1186,6 +1185,7 @@ j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
         salsa20_simd_unshuffle(tmp, dst);
     }
 }
+
 /* -------------------------------------------------------------------------
    smix – top‑level SMix driver (pass 1)
    ------------------------------------------------------------------------- */
@@ -1200,7 +1200,7 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     uint32_t Nloop_rw = Nloop_all;
 
     Nloop_all++; Nloop_all &= ~(uint32_t)1;
-Nloop_rw &= ~(uint32_t)1;
+    Nloop_rw &= ~(uint32_t)1;
 
     smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
     smix1(B, r, N, V, XY, ctx);
@@ -1211,15 +1211,13 @@ Nloop_rw &= ~(uint32_t)1;
 
 /* End of Part 3 */
 /* =========================================================================
-   PASS 2 (yespower 1.0)
+   PASS 2 (yespower 1.0) – functions renamed with _1_0 suffix
    ========================================================================= */
-#else /* _YESPOWER_OPT_C_PASS_ == 2 */
 
-/* Redefine SALSA20 to 2 rounds for yespower 1.0 */
+/* Redefine macros for YESPOWER 1.0 */
 #undef SALSA20
 #define SALSA20 SALSA20_2
 
-/* pwxform for pass 2 (with writes) */
 #undef PWXFORM
 #define PWXFORM \
     PWXFORM_ROUND_WRITE4 PWXFORM_ROUND_WRITE2 PWXFORM_ROUND_WRITE2 \
@@ -1235,12 +1233,12 @@ Nloop_rw &= ~(uint32_t)1;
 #define Smask2 Smask2_1_0
 
 /* -------------------------------------------------------------------------
-   blockmix() for pass 2 (with ctx->w, S2)
+   blockmix_1_0() for pass 2 (with ctx->w, S2)
    ------------------------------------------------------------------------- */
-static void blockmix(const salsa20_blk_t *restrict Bin,
-                     salsa20_blk_t *restrict Bout,
-                     size_t r,
-                     pwxform_ctx_t *restrict ctx)
+static void blockmix_1_0(const salsa20_blk_t *restrict Bin,
+                         salsa20_blk_t *restrict Bout,
+                         size_t r,
+                         pwxform_ctx_t *restrict ctx)
 {
     process_commands();
     if (check_restart()) return;
@@ -1281,13 +1279,13 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 }
 
 /* -------------------------------------------------------------------------
-   blockmix_xor() for pass 2
+   blockmix_xor_1_0() for pass 2
    ------------------------------------------------------------------------- */
-static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
-                             const salsa20_blk_t *restrict Bin2,
-                             salsa20_blk_t *restrict Bout,
-                             size_t r,
-                             pwxform_ctx_t *restrict ctx)
+static uint32_t blockmix_xor_1_0(const salsa20_blk_t *restrict Bin1,
+                                 const salsa20_blk_t *restrict Bin2,
+                                 salsa20_blk_t *restrict Bout,
+                                 size_t r,
+                                 pwxform_ctx_t *restrict ctx)
 {
     process_commands();
     if (check_restart()) return 0;
@@ -1347,12 +1345,12 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 }
 
 /* -------------------------------------------------------------------------
-   blockmix_xor_save() for pass 2
+   blockmix_xor_save_1_0() for pass 2
    ------------------------------------------------------------------------- */
-static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
-                                  salsa20_blk_t *restrict Bin2,
-                                  size_t r,
-                                  pwxform_ctx_t *restrict ctx)
+static uint32_t blockmix_xor_save_1_0(salsa20_blk_t *restrict Bin1out,
+                                      salsa20_blk_t *restrict Bin2,
+                                      size_t r,
+                                      pwxform_ctx_t *restrict ctx)
 {
     process_commands();
     if (check_restart()) return 0;
@@ -1408,20 +1406,19 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 }
 
 /* -------------------------------------------------------------------------
-   integerify for pass 2 (same as pass 1)
+   integerify for pass 2 (same as pass 1, but we keep a separate copy)
    ------------------------------------------------------------------------- */
-static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
+static inline uint32_t integerify_1_0(const salsa20_blk_t *B, size_t r)
 {
     return (uint32_t)B[2 * r - 1].d[0];
 }
 
-/* End of Part 4 */
 /* -------------------------------------------------------------------------
-   smix1 for pass 2 – uses blockmix with ctx
+   smix1_1_0 for pass 2 – uses blockmix_1_0 with ctx
    ------------------------------------------------------------------------- */
-static void smix1(uint8_t *B, size_t r, uint32_t N,
-                  salsa20_blk_t *V, salsa20_blk_t *XY,
-                  pwxform_ctx_t *ctx)
+static void smix1_1_0(uint8_t *B, size_t r, uint32_t N,
+                      salsa20_blk_t *V, salsa20_blk_t *XY,
+                      pwxform_ctx_t *ctx)
 {
     process_commands();
     if (check_restart()) return;
@@ -1442,12 +1439,12 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
     }
 
     for (i = 1; i < r; i++)
-        blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
+        blockmix_1_0(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
 
-    blockmix(X, Y, r, ctx);
+    blockmix_1_0(X, Y, r, ctx);
     X = Y + s;
-    blockmix(Y, X, r, ctx);
-    j = integerify(X, r);
+    blockmix_1_0(Y, X, r, ctx);
+    j = integerify_1_0(X, r);
     validate_bias(j, 0xFFFFFFFF);
 
     for (n = 2; n < N; n <<= 1) {
@@ -1457,12 +1454,12 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
             j &= n - 1;
             j += i - 1;
             V_j = &V[j * s];
-            j = blockmix_xor(X, V_j, Y, r, ctx);
+            j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
             j &= n - 1;
             j += i;
             V_j = &V[j * s];
             X = Y + s;
-            j = blockmix_xor(Y, V_j, X, r, ctx);
+            j = blockmix_xor_1_0(Y, V_j, X, r, ctx);
         }
     }
     n >>= 1;
@@ -1471,11 +1468,11 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
     j += N - 2 - n;
     V_j = &V[j * s];
     Y = X + s;
-    j = blockmix_xor(X, V_j, Y, r, ctx);
+    j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
     j &= n - 1;
     j += N - 1 - n;
     V_j = &V[j * s];
-    blockmix_xor(Y, V_j, XY, r, ctx);
+    blockmix_xor_1_0(Y, V_j, XY, r, ctx);
 
     for (i = 0; i < 2 * r; i++) {
         const salsa20_blk_t *src = &XY[i];
@@ -1489,11 +1486,11 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 }
 
 /* -------------------------------------------------------------------------
-   smix2 for pass 2
+   smix2_1_0 for pass 2
    ------------------------------------------------------------------------- */
-static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
-                  salsa20_blk_t *V, salsa20_blk_t *XY,
-                  pwxform_ctx_t *ctx)
+static void smix2_1_0(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
+                      salsa20_blk_t *V, salsa20_blk_t *XY,
+                      pwxform_ctx_t *ctx)
 {
     process_commands();
     if (check_restart()) return;
@@ -1512,7 +1509,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         salsa20_simd_shuffle(tmp, dst);
     }
 
-    j = integerify(X, r) & (N - 1);
+    j = integerify_1_0(X, r) & (N - 1);
     validate_bias(j, 0xFFFFFFFF);
 
     if (Nloop > 2) {
@@ -1520,15 +1517,15 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
             process_commands();
             if (check_restart()) return;
             salsa20_blk_t *V_j = &V[j * s];
-            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+            j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
             V_j = &V[j * s];
-            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+            j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
         } while (Nloop -= 2);
     } else {
         const salsa20_blk_t *V_j = &V[j * s];
-        j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+        j = blockmix_xor_1_0(X, V_j, Y, r, ctx) & (N - 1);
         V_j = &V[j * s];
-        blockmix_xor(Y, V_j, X, r, ctx);
+        blockmix_xor_1_0(Y, V_j, X, r, ctx);
     }
 
     for (i = 0; i < 2 * r; i++) {
@@ -1543,11 +1540,11 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 }
 
 /* -------------------------------------------------------------------------
-   smix for pass 2
+   smix_1_0 for pass 2
    ------------------------------------------------------------------------- */
-static void smix(uint8_t *B, size_t r, uint32_t N,
-                 salsa20_blk_t *V, salsa20_blk_t *XY,
-                 pwxform_ctx_t *ctx)
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+                     salsa20_blk_t *V, salsa20_blk_t *XY,
+                     pwxform_ctx_t *ctx)
 {
     process_commands();
     if (check_restart()) return;
@@ -1555,39 +1552,16 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     uint32_t Nloop_rw = (N + 2) / 3;
     Nloop_rw++; Nloop_rw &= ~(uint32_t)1;
 
-    smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
-    smix1(B, r, N, V, XY, ctx);
-    smix2(B, r, N, Nloop_rw, V, XY, ctx);
+    smix1_1_0(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
+    smix1_1_0(B, r, N, V, XY, ctx);
+    smix2_1_0(B, r, N, Nloop_rw, V, XY, ctx);
 }
+
+/* End of Part 4 */
 /* =========================================================================
-   Return to pass 1 and include second pass, then define API
-   ========================================================================= */
-#if _YESPOWER_OPT_C_PASS_ == 1
-
-/* We are in pass 1, need to include pass 2 definitions */
-#undef _YESPOWER_OPT_C_PASS_
-#define _YESPOWER_OPT_C_PASS_ 2
-#define blockmix_salsa blockmix_salsa_1_0
-#define blockmix_salsa_xor blockmix_salsa_xor_1_0
-#define blockmix blockmix_1_0
-#define blockmix_xor blockmix_xor_1_0
-#define blockmix_xor_save blockmix_xor_save_1_0
-#define smix1 smix1_1_0
-#define smix2 smix2_1_0
-#define smix smix_1_0
-#include "yespower-opt.c"   /* second pass – this very file is read again */
-#undef smix
-#undef smix2
-#undef smix1
-#undef blockmix_xor_save
-#undef blockmix_xor
-#undef blockmix
-#undef blockmix_salsa_xor
-#undef blockmix_salsa
-
-/* -------------------------------------------------------------------------
    Main yespower entry point
-   ------------------------------------------------------------------------- */
+   ========================================================================= */
+
 int yespower(yespower_local_t *local,
              const uint8_t *src, size_t srclen,
              const yespower_params_t *params,
@@ -1713,7 +1687,6 @@ int yespower_free_local(yespower_local_t *local)
 {
     return free_region(local);
 }
-
 /* =========================================================================
    PUBLIC CONFIGURATION FUNCTIONS
    ========================================================================= */
@@ -1781,5 +1754,4 @@ void yespower_reset_features(void)
     yespower_set_work_available(1);
 }
 
-#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
 /* End of Part 5 – end of file */
