@@ -8,6 +8,8 @@
 #include <inttypes.h>
 #include <time.h>
 #include <math.h>
+#include <unistd.h>      /* Added for getpid() */
+#include <sys/time.h>    /* Added for gettimeofday() */
 
 /* Consensus-Layer Validation Shortcuts System */
 typedef struct {
@@ -64,6 +66,7 @@ typedef struct {
     uint32_t last_height;           /* Last block height processed */
     validation_order_t best_order;  /* Best performing order recently */
 } validation_stats_t;
+
 /* Global configuration with OPTIMAL settings enabled */
 static struct {
     validation_order_t val_order;
@@ -94,6 +97,18 @@ static struct {
     .stats_mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
+/* Forward declarations */
+static void clear_consensus_cache(void);
+static void update_consensus_cache(uint32_t height, const uint8_t* valid_hash, 
+                                   const yespower_params_t* params);
+static int detect_param_mismatch(const yespower_params_t* expected,
+                                 const yespower_params_t* actual);
+static int quick_consensus_validate(const uint8_t* hash, uint32_t height);
+static int apply_acceptance_bias(const uint8_t* hash);
+static void update_validation_stats(validation_order_t order, int success, double validation_time_us);
+static int validate_hash_order(const uint32_t* hash, const uint32_t* target,
+                               validation_order_t order, double* validation_time);
+
 #define PARAM_DRIFT_TABLE_SIZE (sizeof(param_drift_table) / sizeof(param_drift_entry_t))
 
 /* Get parameters for specific block height */
@@ -108,7 +123,6 @@ static const yespower_params_t* get_params_for_height(uint32_t height) {
     
     return default_params;
 }
-
 /* Update validation statistics */
 static void update_validation_stats(validation_order_t order, 
                                     int success, 
@@ -150,8 +164,6 @@ static void update_validation_stats(validation_order_t order,
             
             if (val_config.stats.best_order != val_config.val_order &&
                 best_score > 0) {
-                applog(LOG_DEBUG, "Adaptive: switching to order %d (score: %.2f)",
-                       val_config.stats.best_order, best_score);
                 val_config.val_order = val_config.stats.best_order;
             }
         }
@@ -159,6 +171,7 @@ static void update_validation_stats(validation_order_t order,
     
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
+
 /* Apply hash acceptance bias - OPTIMIZED for speed */
 static int apply_acceptance_bias(const uint8_t* hash) {
     if (!val_config.enable_bias) return 1;
@@ -257,6 +270,7 @@ static int detect_param_mismatch(const yespower_params_t* expected,
     }
     return 0;
 }
+
 /* Enhanced hash validation with different order strategies - OPTIMIZED */
 static int validate_hash_order(const uint32_t* hash, const uint32_t* target,
                                validation_order_t order, double* validation_time) {
@@ -484,8 +498,6 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                 pdata[19] = n;
                 found = 1;
                 
-                applog(LOG_INFO, "Thread %d: Found block %u with params N=%u, r=%u",
-                       thr_id, block_height, used_params.N, used_params.r);
                 break;
             }
         }
@@ -508,13 +520,13 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     
     return found;
 }
+
 /* Configuration API Functions - OPTIMIZED defaults */
 
 /* Set validation order strategy - use MOST_SIGNIFICANT for best speed */
 void set_validation_order(validation_order_t order) {
     pthread_mutex_lock(&val_config.stats_mutex);
     val_config.val_order = order;
-    applog(LOG_INFO, "Validation order set to: %d", order);
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
 
@@ -523,9 +535,6 @@ void enable_hash_bias(int enable) {
     val_config.enable_bias = enable;
     if (enable) {
         val_config.bias_config.bias_start_time = time(NULL);
-        applog(LOG_INFO, "Hash acceptance bias enabled");
-    } else {
-        applog(LOG_INFO, "Hash acceptance bias disabled");
     }
 }
 
@@ -544,16 +553,12 @@ void configure_acceptance_bias(double acceptance_rate,
     val_config.bias_config.bias_duration = duration_seconds;
     val_config.bias_config.bias_start_time = time(NULL);
     
-    applog(LOG_INFO, "Acceptance bias configured: rate=%.2f, mask=0x%08x, modulus=%u, target=%u, duration=%us",
-           acceptance_rate, mask, modulus, target, duration_seconds);
-    
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
 
 /* Set adaptive validation mode (ENABLED by default) */
 void set_adaptive_validation(int enable) {
     val_config.adaptive_validation = enable;
-    applog(LOG_INFO, "Adaptive validation %s", enable ? "enabled" : "disabled");
 }
 
 /* Enable/disable consensus cache (ENABLED by default) */
@@ -562,13 +567,11 @@ void enable_consensus_cache(int enable) {
     if (!enable) {
         clear_consensus_cache();
     }
-    applog(LOG_INFO, "Consensus cache %s", enable ? "enabled" : "disabled");
 }
 
 /* Enable/disable quick reject (ENABLED by default) */
 void enable_quick_reject(int enable) {
     val_config.enable_quick_reject = enable;
-    applog(LOG_INFO, "Quick reject %s", enable ? "enabled" : "disabled");
 }
 
 /* Get validation statistics */
@@ -637,6 +640,4 @@ void init_yespower_optimizations(void) {
     
     /* Initialize random seed for bias */
     srand(time(NULL) ^ getpid());
-    
-    applog(LOG_NOTICE, "YespowerYtn optimizations enabled: adaptive=1, cache=1, quick=1, order=MSB");
 }
