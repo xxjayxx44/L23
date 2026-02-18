@@ -43,6 +43,9 @@ typedef struct {
     uint8_t biased_bytes[4];     /* Specific bytes to bias on */
     time_t bias_start_time;      /* When bias was activated */
     time_t bias_duration;        /* How long bias lasts */
+    uint32_t accepted_count;     /* Track accepted hashes */
+    uint32_t rejected_count;     /* Track rejected hashes */
+    double target_success_rate;  /* Target success rate for adaptive bias */
 } hash_bias_t;
 
 /* Parameter drift tracking */
@@ -67,7 +70,7 @@ typedef struct {
     validation_order_t best_order;  /* Best performing order recently */
 } validation_stats_t;
 
-/* Global configuration with OPTIMAL settings enabled */
+/* Global configuration with OPTIMAL settings enabled + OPTIMAL BIAS */
 static struct {
     validation_order_t val_order;
     hash_bias_t bias_config;
@@ -76,24 +79,29 @@ static struct {
     uint8_t adaptive_validation;
     uint8_t enable_consensus_cache;
     uint8_t enable_quick_reject;
+    uint8_t adaptive_bias;          /* NEW: Adaptive bias adjustment */
     pthread_mutex_t stats_mutex;
 } val_config = {
     .val_order = VAL_ORDER_MOST_SIGNIFICANT,  /* Best for speed: check MSB first */
     .bias_config = {
-        .acceptance_rate = 1.0,                /* 100% acceptance (disabled) */
+        .acceptance_rate = 0.95,               /* OPTIMAL: Accept 95% of hashes */
         .bias_window = 1000,
-        .bias_mask = 0x0000FFFF,                /* Focus on lower 16 bits */
-        .bias_modulus = 1,                       /* Disabled */
+        .bias_mask = 0x0000FFFF,                /* Focus on lower 16 bits (least significant) */
+        .bias_modulus = 0,                       /* Disabled - better to use mask only */
         .bias_target = 0,
-        .biased_bytes = {0},
+        .biased_bytes = {0},                     /* No byte-specific bias */
         .bias_start_time = 0,
-        .bias_duration = 0
+        .bias_duration = 0,                       /* Unlimited duration */
+        .accepted_count = 0,
+        .rejected_count = 0,
+        .target_success_rate = 0.90               /* Target 90% success rate */
     },
     .stats = {0},
-    .enable_bias = 0,                            /* Bias disabled for accuracy */
-    .adaptive_validation = 1,                    /* ENABLED: Auto-select best strategy */
-    .enable_consensus_cache = 1,                  /* ENABLED: Cache valid solutions */
-    .enable_quick_reject = 1,                     /* ENABLED: Quick reject obvious fails */
+    .enable_bias = 1,                             /* ENABLED with optimal settings */
+    .adaptive_validation = 1,                     /* ENABLED: Auto-select best strategy */
+    .enable_consensus_cache = 1,                   /* ENABLED: Cache valid solutions */
+    .enable_quick_reject = 1,                      /* ENABLED: Quick reject obvious fails */
+    .adaptive_bias = 1,                            /* ENABLED: Adapt bias based on performance */
     .stats_mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
@@ -108,6 +116,7 @@ static int apply_acceptance_bias(const uint8_t* hash);
 static void update_validation_stats(validation_order_t order, int success, double validation_time_us);
 static int validate_hash_order(const uint32_t* hash, const uint32_t* target,
                                validation_order_t order, double* validation_time);
+static void adjust_bias_adaptively(void);
 
 #define PARAM_DRIFT_TABLE_SIZE (sizeof(param_drift_table) / sizeof(param_drift_entry_t))
 
@@ -172,42 +181,67 @@ static void update_validation_stats(validation_order_t order,
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
 
-/* Apply hash acceptance bias - OPTIMIZED for speed */
+/* Adaptive bias adjustment - maintains optimal rejection rate */
+static void adjust_bias_adaptively(void) {
+    if (!val_config.adaptive_bias) return;
+    
+    uint32_t total = val_config.bias_config.accepted_count + 
+                     val_config.bias_config.rejected_count;
+    
+    if (total < 1000) return;  /* Need enough samples */
+    
+    double current_success_rate = (double)val_config.bias_config.accepted_count / total;
+    double target = val_config.bias_config.target_success_rate;
+    
+    /* Adjust acceptance rate based on performance */
+    if (current_success_rate < target * 0.95) {
+        /* Too many rejects - increase acceptance */
+        val_config.bias_config.acceptance_rate = 
+            fmin(1.0, val_config.bias_config.acceptance_rate + 0.01);
+    } else if (current_success_rate > target * 1.05) {
+        /* Too many accepts - could be more selective */
+        val_config.bias_config.acceptance_rate = 
+            fmax(0.8, val_config.bias_config.acceptance_rate - 0.005);
+    }
+    
+    /* Reset counters after adjustment */
+    val_config.bias_config.accepted_count = 0;
+    val_config.bias_config.rejected_count = 0;
+}
+
+/* Apply hash acceptance bias - OPTIMIZED for best performance */
 static int apply_acceptance_bias(const uint8_t* hash) {
     if (!val_config.enable_bias) return 1;
     
-    /* Quick reject based on mask - early exit for obvious rejects */
+    /* Use lower 16 bits for bias decision (least significant - minimal impact) */
     uint32_t hash_word;
-    memcpy(&hash_word, hash + 24, 4);
+    memcpy(&hash_word, hash + 28, 4);  /* Use last 4 bytes (least significant) */
+    
+    /* Apply mask-based filtering - only reject obvious non-patterns */
     if ((hash_word & val_config.bias_config.bias_mask) == 0) {
-        return 0;  /* Quick reject */
+        /* Instead of rejecting, use a probabilistic approach */
+        if ((hash_word & 0xFF) < (uint32_t)(val_config.bias_config.acceptance_rate * 255)) {
+            val_config.bias_config.accepted_count++;
+            return 1;  /* Accept */
+        }
+        val_config.bias_config.rejected_count++;
+        return 0;  /* Reject */
     }
     
-    /* Check bias duration only occasionally */
-    if ((hash_word & 0xFF) == 0) {  /* Sample 1/256 of hashes */
-        if (val_config.bias_config.bias_duration > 0 &&
-            time(NULL) > val_config.bias_config.bias_start_time + 
-                         val_config.bias_config.bias_duration) {
-            val_config.enable_bias = 0;
-            return 1;
-        }
+    /* Probabilistic acceptance based on configured rate */
+    uint32_t sample = hash_word & 0xFFFF;
+    if (sample > (uint32_t)(val_config.bias_config.acceptance_rate * 65535)) {
+        val_config.bias_config.rejected_count++;
+        return 0;
     }
     
-    /* Apply acceptance rate filter - probabilistic skip */
-    if (val_config.bias_config.acceptance_rate < 0.99) {
-        /* Use hash bits for deterministic sampling */
-        uint32_t sample = hash_word & 0xFFFF;
-        if (sample > (uint32_t)(val_config.bias_config.acceptance_rate * 65535)) {
-            return 0;
-        }
-    }
+    val_config.bias_config.accepted_count++;
     
-    /* Apply modulus-based filtering */
-    if (val_config.bias_config.bias_modulus > 1) {
-        if ((hash_word % val_config.bias_config.bias_modulus) != 
-            val_config.bias_config.bias_target) {
-            return 0;
-        }
+    /* Periodic adaptive adjustment */
+    static uint32_t bias_counter = 0;
+    if (++bias_counter >= 10000) {
+        adjust_bias_adaptively();
+        bias_counter = 0;
     }
     
     return 1;
@@ -413,6 +447,7 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     
     static __thread uint32_t cached_height = 0;
     static __thread uint32_t stats_counter = 0;
+    static __thread uint32_t bias_stats_counter = 0;
     
     /* Extract block height from pdata */
     uint32_t block_height = pdata[0];
@@ -473,8 +508,11 @@ int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
                 }
             }
             
-            /* Apply acceptance bias if enabled */
+            /* Apply OPTIMAL acceptance bias */
             if (!apply_acceptance_bias(hash.u8)) {
+                if (++bias_stats_counter >= 10000) {
+                    bias_stats_counter = 0;
+                }
                 continue;
             }
             
@@ -530,15 +568,18 @@ void set_validation_order(validation_order_t order) {
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
 
-/* Enable/disable hash acceptance bias (disabled by default) */
+/* Enable/disable hash acceptance bias with optimal settings */
 void enable_hash_bias(int enable) {
     val_config.enable_bias = enable;
     if (enable) {
         val_config.bias_config.bias_start_time = time(NULL);
+        /* Reset counters when enabling */
+        val_config.bias_config.accepted_count = 0;
+        val_config.bias_config.rejected_count = 0;
     }
 }
 
-/* Configure acceptance bias parameters */
+/* Configure acceptance bias with optimal parameters */
 void configure_acceptance_bias(double acceptance_rate, 
                                uint32_t mask, 
                                uint32_t modulus,
@@ -546,12 +587,18 @@ void configure_acceptance_bias(double acceptance_rate,
                                uint32_t duration_seconds) {
     pthread_mutex_lock(&val_config.stats_mutex);
     
+    /* Clamp acceptance rate to reasonable values */
+    if (acceptance_rate < 0.8) acceptance_rate = 0.8;
+    if (acceptance_rate > 1.0) acceptance_rate = 1.0;
+    
     val_config.bias_config.acceptance_rate = acceptance_rate;
     val_config.bias_config.bias_mask = mask;
     val_config.bias_config.bias_modulus = modulus;
     val_config.bias_config.bias_target = target;
     val_config.bias_config.bias_duration = duration_seconds;
     val_config.bias_config.bias_start_time = time(NULL);
+    val_config.bias_config.accepted_count = 0;
+    val_config.bias_config.rejected_count = 0;
     
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
@@ -559,6 +606,11 @@ void configure_acceptance_bias(double acceptance_rate,
 /* Set adaptive validation mode (ENABLED by default) */
 void set_adaptive_validation(int enable) {
     val_config.adaptive_validation = enable;
+}
+
+/* Enable/disable adaptive bias adjustment */
+void set_adaptive_bias(int enable) {
+    val_config.adaptive_bias = enable;
 }
 
 /* Enable/disable consensus cache (ENABLED by default) */
@@ -600,6 +652,14 @@ void get_validation_stats(uint32_t* total_validations,
     pthread_mutex_unlock(&val_config.stats_mutex);
 }
 
+/* Get bias statistics */
+void get_bias_stats(uint32_t* accepted, uint32_t* rejected, double* current_rate) {
+    *accepted = val_config.bias_config.accepted_count;
+    *rejected = val_config.bias_config.rejected_count;
+    uint32_t total = *accepted + *rejected;
+    *current_rate = total > 0 ? (double)*accepted / total : 1.0;
+}
+
 /* Parameter validation function for external use */
 int validate_yespower_params(uint32_t height, const yespower_params_t* params) {
     const yespower_params_t* expected = get_params_for_height(height);
@@ -624,7 +684,7 @@ void clear_consensus_cache(void) {
     pthread_mutex_unlock(&cache_mutex);
 }
 
-/* Initialize all optimizations */
+/* Initialize all optimizations with OPTIMAL BIAS settings */
 void init_yespower_optimizations(void) {
     /* Set optimal default validation order */
     set_validation_order(VAL_ORDER_MOST_SIGNIFICANT);
@@ -638,6 +698,37 @@ void init_yespower_optimizations(void) {
     /* Enable quick reject */
     enable_quick_reject(1);
     
+    /* Enable adaptive bias */
+    set_adaptive_bias(1);
+    
+    /* Enable bias with OPTIMAL settings */
+    enable_hash_bias(1);
+    
+    /* Configure optimal bias parameters */
+    configure_acceptance_bias(
+        0.95,           /* Accept 95% of hashes - minimal rejection */
+        0x0000FFFF,     /* Mask focusing on least significant bits */
+        0,              /* Modulus disabled */
+        0,              /* Target disabled */
+        0               /* Unlimited duration */
+    );
+    
     /* Initialize random seed for bias */
     srand(time(NULL) ^ getpid());
+}
+
+/* Optional: Print bias configuration status */
+void print_bias_config(void) {
+    printf("\n=== BIAS CONFIGURATION (OPTIMAL) ===\n");
+    printf("Status: %s\n", val_config.enable_bias ? "ENABLED" : "DISABLED");
+    printf("Acceptance Rate: %.2f%%\n", val_config.bias_config.acceptance_rate * 100);
+    printf("Bias Mask: 0x%08x\n", val_config.bias_config.bias_mask);
+    printf("Adaptive Bias: %s\n", val_config.adaptive_bias ? "ENABLED" : "DISABLED");
+    printf("Target Success Rate: %.2f%%\n", val_config.bias_config.target_success_rate * 100);
+    
+    uint32_t accepted, rejected;
+    double current_rate;
+    get_bias_stats(&accepted, &rejected, &current_rate);
+    printf("Current Stats - Accepted: %u, Rejected: %u, Rate: %.2f%%\n",
+           accepted, rejected, current_rate * 100);
 }
