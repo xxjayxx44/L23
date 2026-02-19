@@ -131,6 +131,7 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
+
 #ifdef __SSE2__
 #define DECL_X \
 	__m128i X0, X1, X2, X3;
@@ -181,9 +182,9 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	(out).q[3] = X3 = _mm_add_epi32(X3, Z3); \
 }
 
-#define SALSA20_2(out) SALSA20_wrapper(out, SALSA20_2ROUNDS)
+#define SALSA20_2(out) do { SALSA20_wrapper(out, SALSA20_2ROUNDS); } while (0)
 #define SALSA20_8ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS
-#define SALSA20_8(out) SALSA20_wrapper(out, SALSA20_8ROUNDS)
+#define SALSA20_8(out) do { SALSA20_wrapper(out, SALSA20_8ROUNDS); } while (0)
 
 #define XOR_X(in) \
 	X0 = _mm_xor_si128(X0, (in).q[0]); \
@@ -257,9 +258,9 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	(out).q[3] = X3 = vaddq_u32(X3, Z3); \
 }
 
-#define SALSA20_2(out) SALSA20_wrapper(out, SALSA20_2ROUNDS)
+#define SALSA20_2(out) do { SALSA20_wrapper(out, SALSA20_2ROUNDS); } while (0)
 #define SALSA20_8ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS
-#define SALSA20_8(out) SALSA20_wrapper(out, SALSA20_8ROUNDS)
+#define SALSA20_8(out) do { SALSA20_wrapper(out, SALSA20_8ROUNDS); } while (0)
 
 #define XOR_X(in) \
 	X0 = veorq_u32(X0, (in).q[0]); \
@@ -287,36 +288,13 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 
 #else /* !defined(__SSE2__) && !defined(__ARM_NEON__) */
 
-#define DECL_X \
-	salsa20_blk_t X;
-#define DECL_Y \
-	salsa20_blk_t Y;
+/* Generic C fallback – define salsa20 function first, then macros */
 
-#define COPY(out, in) \
-	(out).d[0] = (in).d[0]; \
-	(out).d[1] = (in).d[1]; \
-	(out).d[2] = (in).d[2]; \
-	(out).d[3] = (in).d[3]; \
-	(out).d[4] = (in).d[4]; \
-	(out).d[5] = (in).d[5]; \
-	(out).d[6] = (in).d[6]; \
-	(out).d[7] = (in).d[7];
-
-#define READ_X(in) COPY(X, in)
-#define WRITE_X(out) COPY(out, X)
-
-/**
- * salsa20(B):
- * Apply the Salsa20 core to the provided block.
- */
-static inline void salsa20(salsa20_blk_t *restrict B,
-    salsa20_blk_t *restrict Bout, uint32_t doublerounds)
+static inline void salsa20(salsa20_blk_t *B, salsa20_blk_t *Bout, uint32_t doublerounds)
 {
 	salsa20_blk_t X;
 #define x X.w
-
 	salsa20_simd_unshuffle(B, &X);
-
 	do {
 #define R(a,b) (((a) << (b)) | ((a) >> (32 - (b))))
 		/* Operate on columns */
@@ -347,21 +325,38 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #undef R
 	} while (--doublerounds);
 #undef x
-
 	{
 		uint32_t i;
 		salsa20_simd_shuffle(&X, Bout);
 		for (i = 0; i < 16; i += 4) {
-			B->w[i] = Bout->w[i] += B->w[i];
-			B->w[i + 1] = Bout->w[i + 1] += B->w[i + 1];
-			B->w[i + 2] = Bout->w[i + 2] += B->w[i + 2];
-			B->w[i + 3] = Bout->w[i + 3] += B->w[i + 3];
+			B->w[i]   = Bout->w[i]   += B->w[i];
+			B->w[i+1] = Bout->w[i+1] += B->w[i+1];
+			B->w[i+2] = Bout->w[i+2] += B->w[i+2];
+			B->w[i+3] = Bout->w[i+3] += B->w[i+3];
 		}
 	}
 }
 
-#define SALSA20_2(out) salsa20(&X, &out, 1)
-#define SALSA20_8(out) salsa20(&X, &out, 4)
+#define DECL_X \
+	salsa20_blk_t X;
+#define DECL_Y \
+	salsa20_blk_t Y;
+
+#define COPY(out, in) \
+	(out).d[0] = (in).d[0]; \
+	(out).d[1] = (in).d[1]; \
+	(out).d[2] = (in).d[2]; \
+	(out).d[3] = (in).d[3]; \
+	(out).d[4] = (in).d[4]; \
+	(out).d[5] = (in).d[5]; \
+	(out).d[6] = (in).d[6]; \
+	(out).d[7] = (in).d[7];
+
+#define READ_X(in) COPY(X, in)
+#define WRITE_X(out) COPY(out, X)
+
+#define SALSA20_2(out) do { salsa20(&X, &out, 1); } while (0)
+#define SALSA20_8(out) do { salsa20(&X, &out, 4); } while (0)
 
 #define XOR(out, in1, in2) \
 	(out).d[0] = (in1).d[0] ^ (in2).d[0]; \
@@ -381,20 +376,20 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 	XOR(X, X, Y)
 
 #define INTEGERIFY (uint32_t)X.d[0]
-#endif
 
+#endif /* SIMD branches */
+
+/* Common macro for all paths */
 #define SALSA20_XOR_MEM(in, out) \
-	XOR_X(in) \
-	SALSA20(out)
+	do { XOR_X(in); SALSA20(out); } while (0)
 
 #define SALSA20 SALSA20_8
 
-/* blockmix_salsa and blockmix_salsa_xor are defined unconditionally */
+/* blockmix_salsa and blockmix_salsa_xor (used by both passes) */
 static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
 	DECL_X
-
 	READ_X(Bin[1])
 	SALSA20_XOR_MEM(Bin[0], Bout[0])
 	SALSA20_XOR_MEM(Bin[1], Bout[1])
@@ -404,13 +399,11 @@ static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
 {
 	DECL_X
-
 	XOR_X_2(Bin1[1], Bin2[1])
 	XOR_X(Bin1[0])
 	SALSA20_XOR_MEM(Bin2[0], Bout[0])
 	XOR_X(Bin1[1])
 	SALSA20_XOR_MEM(Bin2[1], Bout[1])
-
 	return INTEGERIFY;
 }
 /* This is tunable, but it is part of what defines a yespower version */
@@ -514,7 +507,7 @@ static volatile uint64_t Smask2var = Smask2;
 #define FORCE_REGALLOC_1 /* empty */
 #define FORCE_REGALLOC_2 /* empty */
 #endif
-#define PWXFORM_SIMD(X) { \
+#define PWXFORM_SIMD(X) do { \
 	uint64_t x; \
 	FORCE_REGALLOC_1 \
 	uint32_t lo = x = EXTRACT64(X) & Smask2reg; \
@@ -523,7 +516,7 @@ static volatile uint64_t Smask2var = Smask2;
 	X = _mm_mul_epu32(HI32(X), X); \
 	X = _mm_add_epi64(X, *(__m128i *)(S0 + lo)); \
 	X = _mm_xor_si128(X, *(__m128i *)(S1 + hi)); \
-}
+} while (0)
 #elif defined(__x86_64__)
 /* 64-bit without AVX.  This relies on out-of-order execution and register
  * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
@@ -537,7 +530,7 @@ static volatile uint64_t Smask2var = Smask2;
 #else
 #define REGISTER_PREFIX "r"
 #endif
-#define PWXFORM_SIMD(X) { \
+#define PWXFORM_SIMD(X) do { \
 	__m128i H; \
 	__asm__( \
 	    "movd %0, %%rax\n\t" \
@@ -551,60 +544,64 @@ static volatile uint64_t Smask2var = Smask2;
 	    : "+x" (X), "=x" (H) \
 	    : "d" (Smask2), "S" (S0), "D" (S1) \
 	    : "cc", "ax", "cx"); \
-}
+} while (0)
 #elif defined(USE_SSE4_FOR_32BIT) && defined(__SSE4_1__)
 /* 32-bit with SSE4.1 */
-#define PWXFORM_SIMD(X) { \
+#define PWXFORM_SIMD(X) do { \
 	__m128i x = _mm_and_si128(X, _mm_set1_epi64x(Smask2)); \
 	__m128i s0 = *(__m128i *)(S0 + (uint32_t)_mm_cvtsi128_si32(x)); \
 	__m128i s1 = *(__m128i *)(S1 + (uint32_t)_mm_extract_epi32(x, 1)); \
 	X = _mm_mul_epu32(HI32(X), X); \
 	X = _mm_add_epi64(X, s0); \
 	X = _mm_xor_si128(X, s1); \
-}
+} while (0)
 #else
 /* 32-bit without SSE4.1 */
-#define PWXFORM_SIMD(X) { \
+#define PWXFORM_SIMD(X) do { \
 	uint64_t x = EXTRACT64(X) & Smask2; \
 	__m128i s0 = *(__m128i *)(S0 + (uint32_t)x); \
 	__m128i s1 = *(__m128i *)(S1 + (x >> 32)); \
 	X = _mm_mul_epu32(HI32(X), X); \
 	X = _mm_add_epi64(X, s0); \
 	X = _mm_xor_si128(X, s1); \
-}
+} while (0)
 #endif
 
-#define PWXFORM_SIMD_WRITE(X, Sw) \
-	PWXFORM_SIMD(X) \
+#define PWXFORM_SIMD_WRITE(X, Sw) do { \
+	PWXFORM_SIMD(X); \
 	MAYBE_MEMORY_BARRIER \
 	*(__m128i *)(Sw + w) = X; \
-	MAYBE_MEMORY_BARRIER
+	MAYBE_MEMORY_BARRIER \
+} while (0)
 
-#define PWXFORM_ROUND \
-	PWXFORM_SIMD(X0) \
-	PWXFORM_SIMD(X1) \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+#define PWXFORM_ROUND do { \
+	PWXFORM_SIMD(X0); \
+	PWXFORM_SIMD(X1); \
+	PWXFORM_SIMD(X2); \
+	PWXFORM_SIMD(X3); \
+} while (0)
 
-#define PWXFORM_ROUND_WRITE4 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
+#define PWXFORM_ROUND_WRITE4 do { \
+	PWXFORM_SIMD_WRITE(X0, S0); \
+	PWXFORM_SIMD_WRITE(X1, S1); \
 	w += 16; \
-	PWXFORM_SIMD_WRITE(X2, S0) \
-	PWXFORM_SIMD_WRITE(X3, S1) \
-	w += 16;
-
-#define PWXFORM_ROUND_WRITE2 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
+	PWXFORM_SIMD_WRITE(X2, S0); \
+	PWXFORM_SIMD_WRITE(X3, S1); \
 	w += 16; \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+} while (0)
+
+#define PWXFORM_ROUND_WRITE2 do { \
+	PWXFORM_SIMD_WRITE(X0, S0); \
+	PWXFORM_SIMD_WRITE(X1, S1); \
+	w += 16; \
+	PWXFORM_SIMD(X2); \
+	PWXFORM_SIMD(X3); \
+} while (0)
 
 #elif defined(__ARM_NEON__)
 
 /* NEON pwxform */
-#define PWXFORM_SIMD(X) { \
+#define PWXFORM_SIMD(X) do { \
 	uint32x2_t lo = vget_low_u32(X); \
 	uint32x2_t hi = vget_high_u32(X); \
 	uint64x2_t prod = vmull_u32(hi, lo); \
@@ -614,75 +611,86 @@ static volatile uint64_t Smask2var = Smask2;
 	uint64x2_t s0 = vld1q_u64((uint64_t *)(S0 + lo_idx * 8)); \
 	uint64x2_t s1 = vld1q_u64((uint64_t *)(S1 + hi_idx * 8)); \
 	X = vreinterpretq_u32_u64(veorq_u64(vaddq_u64(prod, s0), s1)); \
-}
+} while (0)
 
-#define PWXFORM_SIMD_WRITE(X, Sw) \
-	PWXFORM_SIMD(X) \
+#define PWXFORM_SIMD_WRITE(X, Sw) do { \
+	PWXFORM_SIMD(X); \
 	__builtin_prefetch(Sw + w + 64); \
 	vst1q_u32((uint32_t *)(Sw + w), X); \
-	__builtin_prefetch(Sw + w + 128);
+	__builtin_prefetch(Sw + w + 128); \
+} while (0)
 
-#define PWXFORM_ROUND \
-	PWXFORM_SIMD(X0) \
-	PWXFORM_SIMD(X1) \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+#define PWXFORM_ROUND do { \
+	PWXFORM_SIMD(X0); \
+	PWXFORM_SIMD(X1); \
+	PWXFORM_SIMD(X2); \
+	PWXFORM_SIMD(X3); \
+} while (0)
 
-#define PWXFORM_ROUND_WRITE4 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
+#define PWXFORM_ROUND_WRITE4 do { \
+	PWXFORM_SIMD_WRITE(X0, S0); \
+	PWXFORM_SIMD_WRITE(X1, S1); \
 	w += 16; \
-	PWXFORM_SIMD_WRITE(X2, S0) \
-	PWXFORM_SIMD_WRITE(X3, S1) \
-	w += 16;
-
-#define PWXFORM_ROUND_WRITE2 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
+	PWXFORM_SIMD_WRITE(X2, S0); \
+	PWXFORM_SIMD_WRITE(X3, S1); \
 	w += 16; \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+} while (0)
+
+#define PWXFORM_ROUND_WRITE2 do { \
+	PWXFORM_SIMD_WRITE(X0, S0); \
+	PWXFORM_SIMD_WRITE(X1, S1); \
+	w += 16; \
+	PWXFORM_SIMD(X2); \
+	PWXFORM_SIMD(X3); \
+} while (0)
 
 #else /* !defined(__SSE2__) && !defined(__ARM_NEON__) */
 
-#define PWXFORM_SIMD(x0, x1) { \
+/* Generic C fallback for pwxform */
+#define PWXFORM_SIMD(x0, x1) do { \
 	uint64_t x = x0 & Smask2; \
 	uint64_t *p0 = (uint64_t *)(S0 + (uint32_t)x); \
 	uint64_t *p1 = (uint64_t *)(S1 + (x >> 32)); \
 	x0 = ((x0 >> 32) * (uint32_t)x0 + p0[0]) ^ p1[0]; \
 	x1 = ((x1 >> 32) * (uint32_t)x1 + p0[1]) ^ p1[1]; \
-}
+} while (0)
 
-#define PWXFORM_SIMD_WRITE(x0, x1, Sw) \
-	PWXFORM_SIMD(x0, x1) \
+#define PWXFORM_SIMD_WRITE(x0, x1, Sw) do { \
+	PWXFORM_SIMD(x0, x1); \
 	((uint64_t *)(Sw + w))[0] = x0; \
-	((uint64_t *)(Sw + w))[1] = x1;
+	((uint64_t *)(Sw + w))[1] = x1; \
+} while (0)
 
-#define PWXFORM_ROUND \
-	PWXFORM_SIMD(X.d[0], X.d[1]) \
-	PWXFORM_SIMD(X.d[2], X.d[3]) \
-	PWXFORM_SIMD(X.d[4], X.d[5]) \
-	PWXFORM_SIMD(X.d[6], X.d[7])
+#define PWXFORM_ROUND do { \
+	PWXFORM_SIMD(X.d[0], X.d[1]); \
+	PWXFORM_SIMD(X.d[2], X.d[3]); \
+	PWXFORM_SIMD(X.d[4], X.d[5]); \
+	PWXFORM_SIMD(X.d[6], X.d[7]); \
+} while (0)
 
-#define PWXFORM_ROUND_WRITE4 \
-	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
-	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+#define PWXFORM_ROUND_WRITE4 do { \
+	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0); \
+	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1); \
 	w += 16; \
-	PWXFORM_SIMD_WRITE(X.d[4], X.d[5], S0) \
-	PWXFORM_SIMD_WRITE(X.d[6], X.d[7], S1) \
-	w += 16;
-
-#define PWXFORM_ROUND_WRITE2 \
-	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
-	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+	PWXFORM_SIMD_WRITE(X.d[4], X.d[5], S0); \
+	PWXFORM_SIMD_WRITE(X.d[6], X.d[7], S1); \
 	w += 16; \
-	PWXFORM_SIMD(X.d[4], X.d[5]) \
-	PWXFORM_SIMD(X.d[6], X.d[7])
-#endif
+} while (0)
 
-#define PWXFORM \
-	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND \
-	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND
+#define PWXFORM_ROUND_WRITE2 do { \
+	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0); \
+	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1); \
+	w += 16; \
+	PWXFORM_SIMD(X.d[4], X.d[5]); \
+	PWXFORM_SIMD(X.d[6], X.d[7]); \
+} while (0)
+
+#endif /* SIMD branches for pwxform */
+
+#define PWXFORM do { \
+	PWXFORM_ROUND; PWXFORM_ROUND; PWXFORM_ROUND; \
+	PWXFORM_ROUND; PWXFORM_ROUND; PWXFORM_ROUND; \
+} while (0)
 
 #define Smask2 Smask2_0_5
 
@@ -710,17 +718,17 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 	/* Convert count of 128-byte blocks to max index of 64-byte block */
 	r = r * 2 - 1;
 
-	READ_X(Bin[r])
+	READ_X(Bin[r]);
 
-	DECL_SMASK2REG
+	DECL_SMASK2REG;
 
 	i = 0;
 	do {
-		XOR_X(Bin[i])
-		PWXFORM
+		XOR_X(Bin[i]);
+		PWXFORM;
 		if (unlikely(i >= r))
 			break;
-		WRITE_X(Bout[i])
+		WRITE_X(Bout[i]);
 		i++;
 	} while (1);
 
@@ -729,7 +737,7 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 	ctx->w = w;
 #endif
 
-	SALSA20(Bout[i])
+	SALSA20(Bout[i]);
 }
 
 static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
@@ -751,32 +759,32 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	PREFETCH(&Bin2[r], _MM_HINT_T0);
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
+		PREFETCH(&Bin2[i], _MM_HINT_T0);
 	}
 #endif
 
-	XOR_X_2(Bin1[r], Bin2[r])
+	XOR_X_2(Bin1[r], Bin2[r]);
 
-	DECL_SMASK2REG
+	DECL_SMASK2REG;
 
 	i = 0;
 	r--;
 	do {
-		XOR_X(Bin1[i])
-		XOR_X(Bin2[i])
-		PWXFORM
-		WRITE_X(Bout[i])
+		XOR_X(Bin1[i]);
+		XOR_X(Bin2[i]);
+		PWXFORM;
+		WRITE_X(Bout[i]);
 
-		XOR_X(Bin1[i + 1])
-		XOR_X(Bin2[i + 1])
-		PWXFORM
+		XOR_X(Bin1[i + 1]);
+		XOR_X(Bin2[i + 1]);
+		PWXFORM;
 
 		if (unlikely(i >= r))
 			break;
 
-		WRITE_X(Bout[i + 1])
+		WRITE_X(Bout[i + 1]);
 
 		i += 2;
 	} while (1);
@@ -787,7 +795,7 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 	ctx->w = w;
 #endif
 
-	SALSA20(Bout[i])
+	SALSA20(Bout[i]);
 
 	return INTEGERIFY;
 }
@@ -809,30 +817,30 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 	r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	PREFETCH(&Bin2[r], _MM_HINT_T0);
 	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
+		PREFETCH(&Bin2[i], _MM_HINT_T0);
 	}
 #endif
 
-	XOR_X_2(Bin1out[r], Bin2[r])
+	XOR_X_2(Bin1out[r], Bin2[r]);
 
-	DECL_SMASK2REG
+	DECL_SMASK2REG;
 
 	i = 0;
 	r--;
 	do {
-		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
-		PWXFORM
-		WRITE_X(Bin1out[i])
+		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i]);
+		PWXFORM;
+		WRITE_X(Bin1out[i]);
 
-		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
-		PWXFORM
+		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1]);
+		PWXFORM;
 
 		if (unlikely(i >= r))
 			break;
 
-		WRITE_X(Bin1out[i + 1])
+		WRITE_X(Bin1out[i + 1]);
 
 		i += 2;
 	} while (1);
@@ -843,10 +851,11 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 	ctx->w = w;
 #endif
 
-	SALSA20(Bin1out[i])
+	SALSA20(Bin1out[i]);
 
 	return INTEGERIFY;
 }
+
 /**
  * integerify(B, r):
  * Return the result of parsing B_{2r-1} as a little-endian integer.
@@ -1028,15 +1037,18 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 
 /* Second pass overrides for yespower 1.0 */
 #undef PWXFORM
-#define PWXFORM \
-	PWXFORM_ROUND_WRITE4 PWXFORM_ROUND_WRITE2 PWXFORM_ROUND_WRITE2 \
+#define PWXFORM do { \
+	PWXFORM_ROUND_WRITE4; \
+	PWXFORM_ROUND_WRITE2; \
+	PWXFORM_ROUND_WRITE2; \
 	w &= Smask2; \
 	{ \
 		uint8_t *Stmp = S2; \
 		S2 = S1; \
 		S1 = S0; \
 		S0 = Stmp; \
-	}
+	} \
+} while (0)
 
 #undef Smask2
 #define Smask2 Smask2_1_0
@@ -1047,6 +1059,7 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 
 /* The code from the second pass will be included from the self-inclusion above */
 #endif /* _YESPOWER_OPT_C_PASS_ == 2 */
+
 #if _YESPOWER_OPT_C_PASS_ == 1
 
 /**
