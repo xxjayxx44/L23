@@ -144,7 +144,7 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 
 #ifdef __XOP__
 #define ARX(out, in1, in2, s) \
-	out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s));
+	out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s))
 #else
 #define ARX(out, in1, in2, s) { \
 	__m128i tmp = _mm_add_epi32(in1, in2); \
@@ -155,19 +155,19 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 
 #define SALSA20_2ROUNDS \
 	/* Operate on "columns" */ \
-	ARX(X1, X0, X3, 7) \
-	ARX(X2, X1, X0, 9) \
-	ARX(X3, X2, X1, 13) \
-	ARX(X0, X3, X2, 18) \
+	ARX(X1, X0, X3, 7); \
+	ARX(X2, X1, X0, 9); \
+	ARX(X3, X2, X1, 13); \
+	ARX(X0, X3, X2, 18); \
 	/* Rearrange data */ \
 	X1 = _mm_shuffle_epi32(X1, 0x93); \
 	X2 = _mm_shuffle_epi32(X2, 0x4E); \
 	X3 = _mm_shuffle_epi32(X3, 0x39); \
 	/* Operate on "rows" */ \
-	ARX(X3, X0, X1, 7) \
-	ARX(X2, X3, X0, 9) \
-	ARX(X1, X2, X3, 13) \
-	ARX(X0, X1, X2, 18) \
+	ARX(X3, X0, X1, 7); \
+	ARX(X2, X3, X0, 9); \
+	ARX(X1, X2, X3, 13); \
+	ARX(X0, X1, X2, 18); \
 	/* Rearrange data */ \
 	X1 = _mm_shuffle_epi32(X1, 0x39); \
 	X2 = _mm_shuffle_epi32(X2, 0x4E); \
@@ -231,19 +231,19 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 
 #define SALSA20_2ROUNDS \
 	/* Operate on "columns" */ \
-	ARX(X1, X0, X3, 7) \
-	ARX(X2, X1, X0, 9) \
-	ARX(X3, X2, X1, 13) \
-	ARX(X0, X3, X2, 18) \
+	ARX(X1, X0, X3, 7); \
+	ARX(X2, X1, X0, 9); \
+	ARX(X3, X2, X1, 13); \
+	ARX(X0, X3, X2, 18); \
 	/* Rearrange data (vextq = byte shift) */ \
 	X1 = vextq_u32(X1, X1, 1); /* 0x93 */ \
 	X2 = vextq_u32(X2, X2, 2); /* 0x4E */ \
 	X3 = vextq_u32(X3, X3, 3); /* 0x39 */ \
 	/* Operate on "rows" */ \
-	ARX(X3, X0, X1, 7) \
-	ARX(X2, X3, X0, 9) \
-	ARX(X1, X2, X3, 13) \
-	ARX(X0, X1, X2, 18) \
+	ARX(X3, X0, X1, 7); \
+	ARX(X2, X3, X0, 9); \
+	ARX(X1, X2, X3, 13); \
+	ARX(X0, X1, X2, 18); \
 	/* Rearrange data back */ \
 	X1 = vextq_u32(X1, X1, 3); /* 0x39 */ \
 	X2 = vextq_u32(X2, X2, 2); /* 0x4E */ \
@@ -371,15 +371,15 @@ static inline void salsa20(salsa20_blk_t *B, salsa20_blk_t *Bout, uint32_t doubl
 #define XOR_X(in) XOR(X, X, in)
 #define XOR_X_2(in1, in2) XOR(X, in1, in2)
 #define XOR_X_WRITE_XOR_Y_2(out, in) \
-	XOR(Y, out, in) \
-	COPY(out, Y) \
+	XOR(Y, out, in); \
+	COPY(out, Y); \
 	XOR(X, X, Y)
 
 #define INTEGERIFY (uint32_t)X.d[0]
 
 #endif /* SIMD branches */
 
-/* Common macro for all paths */
+/* Common macro for all paths – note the trailing semicolon is NOT included */
 #define SALSA20_XOR_MEM(in, out) \
 	do { XOR_X(in); SALSA20(out); } while (0)
 
@@ -390,20 +390,20 @@ static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
 	DECL_X
-	READ_X(Bin[1])
-	SALSA20_XOR_MEM(Bin[0], Bout[0])
-	SALSA20_XOR_MEM(Bin[1], Bout[1])
+	READ_X(Bin[1]);
+	SALSA20_XOR_MEM(Bin[0], Bout[0]);
+	SALSA20_XOR_MEM(Bin[1], Bout[1]);
 }
 
 static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
 {
 	DECL_X
-	XOR_X_2(Bin1[1], Bin2[1])
-	XOR_X(Bin1[0])
-	SALSA20_XOR_MEM(Bin2[0], Bout[0])
-	XOR_X(Bin1[1])
-	SALSA20_XOR_MEM(Bin2[1], Bout[1])
+	XOR_X_2(Bin1[1], Bin2[1]);
+	XOR_X(Bin1[0]);
+	SALSA20_XOR_MEM(Bin2[0], Bout[0]);
+	XOR_X(Bin1[1]);
+	SALSA20_XOR_MEM(Bin2[1], Bout[1]);
 	return INTEGERIFY;
 }
 /* This is tunable, but it is part of what defines a yespower version */
@@ -855,7 +855,6 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 
 	return INTEGERIFY;
 }
-
 /**
  * integerify(B, r):
  * Return the result of parsing B_{2r-1} as a little-endian integer.
@@ -1059,7 +1058,6 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 
 /* The code from the second pass will be included from the self-inclusion above */
 #endif /* _YESPOWER_OPT_C_PASS_ == 2 */
-
 #if _YESPOWER_OPT_C_PASS_ == 1
 
 /**
