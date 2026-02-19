@@ -64,7 +64,11 @@
 
 #include "yespower.h"
 
+/* Suppress unused-function warnings from included platform file */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include "yespower-platform.c"
+#pragma GCC diagnostic pop
 
 #if __STDC_VERSION__ >= 199901L
 /* Have restrict */
@@ -131,7 +135,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
-
 #ifdef __SSE2__
 #define DECL_X \
 	__m128i X0, X1, X2, X3;
@@ -1003,7 +1006,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
  * to a multiple of at least 16 bytes (aligning them to 64 bytes as well saves
  * cache lines, but it might also result in cache bank conflicts).
  */
-static void smix(uint8_t *B, size_t r, uint32_t N,
+static void __attribute__((unused)) smix(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
 	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
