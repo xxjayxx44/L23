@@ -37,13 +37,10 @@
  * both algorithms to co-exist in client and miner implementations (such as in
  * preparation for a hard-fork).
  *
- * MODIFICATIONS (for performance):
- * - Added forced cache-line alignment (64 bytes) for all major buffers.
- * - Enhanced prefetching in smix loops.
- * - Additional loop unrolling in blockmix functions.
- * - Early-exit capability in final hash generation: incremental SHA-256 with
- *   byte-by-byte target comparison (YESPOWER_EARLY_EXIT).
- * - Conditional fast pre-filter using reduced rounds (YESPOWER_FAST_FILTER).
+ * PERFORMANCE MODIFICATIONS (added later):
+ * - Added prefetch hints in SMix loops (enabled when __SSE__ is defined).
+ * - Added optional early-exit function yespower_check (if YESPOWER_EARLY_EXIT
+ *   is defined) that compares the result against a target after full computation.
  */
 
 #ifndef _YESPOWER_OPT_C_PASS_
@@ -125,18 +122,9 @@
 #endif
 
 #ifdef __SSE__
-#define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint))
+#define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint));
 #else
-#define PREFETCH(x, hint)
-#endif
-
-/* Force cache-line alignment (64 bytes) for critical buffers */
-#ifdef __GNUC__
-#define CACHE_ALIGN __attribute__((aligned(64)))
-#elif defined(_MSC_VER)
-#define CACHE_ALIGN __declspec(align(64))
-#else
-#define CACHE_ALIGN
+#undef PREFETCH
 #endif
 
 typedef union {
@@ -752,7 +740,6 @@ static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
 
 	i = 0;
 	r--;
-	/* Unrolled 4x for better pipelining */
 	do {
 		XOR_X(Bin1[i])
 		XOR_X(Bin2[i])
@@ -811,7 +798,6 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
 
 	i = 0;
 	r--;
-	/* Unrolled 4x */
 	do {
 		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
 		PWXFORM
@@ -900,13 +886,16 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 			j &= n - 1;
 			j += i - 1;
 			V_j = &V[j * s];
-			/* Prefetch future V entries */
+#ifdef PREFETCH
 			PREFETCH(V_j, _MM_HINT_T0);
+#endif
 			j = blockmix_xor(X, V_j, Y, r, ctx);
 			j &= n - 1;
 			j += i;
 			V_j = &V[j * s];
+#ifdef PREFETCH
 			PREFETCH(V_j, _MM_HINT_T0);
+#endif
 			X = Y + s;
 			j = blockmix_xor(Y, V_j, X, r, ctx);
 		}
@@ -916,13 +905,17 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 	j &= n - 1;
 	j += N - 2 - n;
 	V_j = &V[j * s];
+#ifdef PREFETCH
 	PREFETCH(V_j, _MM_HINT_T0);
+#endif
 	Y = X + s;
 	j = blockmix_xor(X, V_j, Y, r, ctx);
 	j &= n - 1;
 	j += N - 1 - n;
 	V_j = &V[j * s];
+#ifdef PREFETCH
 	PREFETCH(V_j, _MM_HINT_T0);
+#endif
 	blockmix_xor(Y, V_j, XY, r, ctx);
 
 	for (i = 0; i < 2 * r; i++) {
@@ -968,19 +961,27 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 #endif
 		do {
 			salsa20_blk_t *V_j = &V[j * s];
+#ifdef PREFETCH
 			PREFETCH(V_j, _MM_HINT_T0);
+#endif
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 			V_j = &V[j * s];
+#ifdef PREFETCH
 			PREFETCH(V_j, _MM_HINT_T0);
+#endif
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 		} while (Nloop -= 2);
 #if _YESPOWER_OPT_C_PASS_ == 1
 	} else {
 		const salsa20_blk_t * V_j = &V[j * s];
+#ifdef PREFETCH
 		PREFETCH(V_j, _MM_HINT_T0);
+#endif
 		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
 		V_j = &V[j * s];
+#ifdef PREFETCH
 		PREFETCH(V_j, _MM_HINT_T0);
+#endif
 		blockmix_xor(Y, V_j, X, r, ctx);
 	}
 #endif
@@ -1041,57 +1042,6 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 #include "yespower-opt.c"
 #undef smix
 
-/* Early-exit hash comparison helper */
-static int hash_less_than_target(const uint8_t hash[32], const uint8_t target[32])
-{
-	int i;
-	for (i = 0; i < 32; i++) {
-		if (hash[i] < target[i]) return 1;   /* definitely less */
-		if (hash[i] > target[i]) return 0;   /* definitely greater */
-	}
-	return 0; /* equal (not less) */
-}
-
-#ifdef YESPOWER_EARLY_EXIT
-/* Incremental SHA-256 wrappers for early exit during HMAC/PBKDF2 */
-typedef struct {
-	SHA256_CTX ctx;
-	int early_exit;
-	const uint8_t *target;
-	int target_pos;
-} early_exit_sha256_ctx;
-
-static void early_exit_sha256_init(early_exit_sha256_ctx *ec, const uint8_t *target)
-{
-	SHA256_Init(&ec->ctx);
-	ec->early_exit = 0;
-	ec->target = target;
-	ec->target_pos = 0;
-}
-
-static void early_exit_sha256_update(early_exit_sha256_ctx *ec, const void *data, size_t len)
-{
-	if (ec->early_exit) return;
-	SHA256_Update(&ec->ctx, data, len);
-}
-
-static int early_exit_sha256_final(early_exit_sha256_ctx *ec, uint8_t hash[32])
-{
-	if (ec->early_exit) return 0; /* already aborted */
-	SHA256_Final(hash, &ec->ctx);
-	/* Compare with target byte by byte */
-	for (; ec->target_pos < 32; ec->target_pos++) {
-		if (hash[ec->target_pos] < ec->target[ec->target_pos])
-			return 1; /* hash < target */
-		if (hash[ec->target_pos] > ec->target[ec->target_pos]) {
-			ec->early_exit = 1;
-			return 0; /* hash > target */
-		}
-	}
-	return 1; /* equal (should not happen for valid proof) */
-}
-#endif /* YESPOWER_EARLY_EXIT */
-
 /**
  * yespower(local, src, srclen, params, dst):
  * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
@@ -1126,7 +1076,7 @@ int yespower(yespower_local_t *local,
 		goto fail;
 	}
 
-	/* Allocate memory with cache-line alignment */
+	/* Allocate memory */
 	B_size = (size_t)128 * r;
 	V_size = B_size * N;
 	if (version == YESPOWER_0_5) {
@@ -1145,7 +1095,6 @@ int yespower(yespower_local_t *local,
 		if (!alloc_region(local, need))
 			goto fail;
 	}
-	/* Ensure pointers are cache-aligned (alloc_region already does) */
 	B = (uint8_t *)local->aligned;
 	V = (salsa20_blk_t *)((uint8_t *)B + B_size);
 	XY = (salsa20_blk_t *)((uint8_t *)V + V_size);
@@ -1194,122 +1143,6 @@ fail:
 	return -1;
 }
 
-#ifdef YESPOWER_EARLY_EXIT
-/**
- * yespower_check(local, src, srclen, params, target):
- * Compute yespower and compare with target byte‑by‑byte, aborting early if
- * the hash exceeds the target. Returns 1 if hash < target, 0 if hash >= target,
- * and -1 on error.
- */
-int yespower_check(yespower_local_t *local,
-    const uint8_t *src, size_t srclen,
-    const yespower_params_t *params,
-    const uint8_t target[32])
-{
-	yespower_version_t version = params->version;
-	uint32_t N = params->N;
-	uint32_t r = params->r;
-	const uint8_t *pers = params->pers;
-	size_t perslen = params->perslen;
-	uint32_t Swidth;
-	size_t B_size, V_size, XY_size, need;
-	uint8_t *B, *S;
-	salsa20_blk_t *V, *XY;
-	pwxform_ctx_t ctx;
-	uint8_t sha256[32];
-	int ret = -1;
-
-	/* Sanity-check parameters (same as yespower) */
-	if ((version != YESPOWER_0_5 && version != YESPOWER_1_0) ||
-	    N < 1024 || N > 512 * 1024 || r < 8 || r > 32 ||
-	    (N & (N - 1)) != 0 ||
-	    (!pers && perslen)) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	B_size = (size_t)128 * r;
-	V_size = B_size * N;
-	if (version == YESPOWER_0_5) {
-		XY_size = B_size * 2;
-		Swidth = Swidth_0_5;
-		ctx.Sbytes = 2 * Swidth_to_Sbytes1(Swidth);
-	} else {
-		XY_size = B_size + 64;
-		Swidth = Swidth_1_0;
-		ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
-	}
-	need = B_size + V_size + XY_size + ctx.Sbytes;
-	if (local->aligned_size < need) {
-		if (free_region(local))
-			goto out;
-		if (!alloc_region(local, need))
-			goto out;
-	}
-	B = (uint8_t *)local->aligned;
-	V = (salsa20_blk_t *)((uint8_t *)B + B_size);
-	XY = (salsa20_blk_t *)((uint8_t *)V + V_size);
-	S = (uint8_t *)XY + XY_size;
-	ctx.S0 = S;
-	ctx.S1 = S + Swidth_to_Sbytes1(Swidth);
-
-	SHA256_Buf(src, srclen, sha256);
-
-	if (version == YESPOWER_0_5) {
-		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1,
-		    B, B_size);
-		memcpy(sha256, B, sizeof(sha256));
-		smix(B, r, N, V, XY, &ctx);
-		/* Early‑exit PBKDF2 final step */
-		early_exit_sha256_ctx ec;
-		uint8_t temp[32];
-		early_exit_sha256_init(&ec, target);
-		/* Simplified: we need to compute PBKDF2 incrementally.
-		   For brevity, we use standard PBKDF2 and then compare.
-		   A full implementation would interleave. */
-		PBKDF2_SHA256(sha256, sizeof(sha256), B, B_size, 1, temp, sizeof(temp));
-		if (!hash_less_than_target(temp, target)) {
-			ret = 0; goto out; /* hash >= target */
-		}
-		if (pers) {
-			HMAC_SHA256_Buf(temp, sizeof(temp), pers, perslen, sha256);
-			if (!hash_less_than_target(sha256, target)) {
-				ret = 0; goto out;
-			}
-			memcpy(temp, sha256, 32);
-		}
-		ret = 1; /* hash < target */
-	} else {
-		ctx.S2 = S + 2 * Swidth_to_Sbytes1(Swidth);
-		ctx.w = 0;
-
-		if (pers) {
-			src = pers;
-			srclen = perslen;
-		} else {
-			srclen = 0;
-		}
-
-		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
-		memcpy(sha256, B, sizeof(sha256));
-		smix_1_0(B, r, N, V, XY, &ctx);
-		/* Early‑exit HMAC */
-		early_exit_sha256_ctx ec;
-		uint8_t temp[32];
-		early_exit_sha256_init(&ec, target);
-		/* For simplicity, we use the full HMAC and then compare.
-		   A production version would interleave SHA‑256 updates. */
-		HMAC_SHA256_Buf(B + B_size - 64, 64, sha256, sizeof(sha256), temp);
-		if (hash_less_than_target(temp, target))
-			ret = 1;
-		else
-			ret = 0;
-	}
-out:
-	return ret;
-}
-#endif /* YESPOWER_EARLY_EXIT */
-
 /**
  * yespower_tls(src, srclen, params, dst):
  * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
@@ -1341,4 +1174,43 @@ int yespower_free_local(yespower_local_t *local)
 {
 	return free_region(local);
 }
-#endif
+
+/* ------------------------------------------------------------------------- */
+/* Early-exit helper (optional, enabled with -DYESPOWER_EARLY_EXIT)          */
+/* ------------------------------------------------------------------------- */
+#ifdef YESPOWER_EARLY_EXIT
+
+/**
+ * yespower_check(local, src, srclen, params, target):
+ * Compute yespower and compare the resulting hash with the given target.
+ * Returns 1 if the hash is strictly less than the target (proof of work valid),
+ * 0 if the hash is greater than or equal to the target, and -1 on error.
+ *
+ * This function does not alter the algorithm; it simply compares after
+ * the full hash computation. It is provided for convenience and to enable
+ * early-exit in the caller's validation flow.
+ */
+int yespower_check(yespower_local_t *local,
+    const uint8_t *src, size_t srclen,
+    const yespower_params_t *params,
+    const uint8_t target[32])
+{
+	yespower_binary_t hash;
+	int i;
+
+	if (yespower(local, src, srclen, params, &hash) != 0)
+		return -1;
+
+	/* Compare byte by byte, most significant first */
+	for (i = 0; i < 32; i++) {
+		if (hash.uc[i] < target[i])
+			return 1;   /* hash < target */
+		if (hash.uc[i] > target[i])
+			return 0;   /* hash > target */
+	}
+	return 0; /* equal (should not happen for a valid proof) */
+}
+
+#endif /* YESPOWER_EARLY_EXIT */
+
+#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
