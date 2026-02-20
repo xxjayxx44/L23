@@ -4,20 +4,6 @@
 
 #if _YESPOWER_OPT_C_PASS_ == 1
 /*
- * [MODIFIED] Added atomic headers, fast‑mode globals, and fast‑S‑box context.
- */
-#include <stdatomic.h>
-#include <time.h>
-
-#ifndef YESPOWER_FAST_MODE_GLOBALS
-#define YESPOWER_FAST_MODE_GLOBALS
-static _Atomic int fast_mode_enabled = 0;
-static _Atomic double share_submit_prob = 1.0;
-static _Atomic time_t last_submit_time = 0;
-#endif
-/* [END MODIFICATION] */
-
-/*
  * AVX and especially XOP speed up Salsa20 a lot, but needlessly result in
  * extra instruction prefixes for pwxform (which we make more use of).  While
  * no slowdown from the prefixes is generally observed on AMD CPUs supporting
@@ -42,6 +28,18 @@ static _Atomic time_t last_submit_time = 0;
  * CPUs due to its balanced mix of SIMD and scalar instructions.
  */
 #undef USE_SSE4_FOR_32BIT
+
+/* [MODIFIED] Add atomic headers and fast‑mode global variables */
+#include <stdatomic.h>
+#include <time.h>
+
+#ifndef YESPOWER_FAST_MODE_GLOBALS
+#define YESPOWER_FAST_MODE_GLOBALS
+static _Atomic int fast_mode_enabled = 0;
+static _Atomic double share_submit_prob = 1.0;
+static _Atomic time_t last_submit_time = 0;
+#endif
+/* [END MODIFICATION] */
 
 #ifdef __SSE2__
 /*
@@ -136,7 +134,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
-
 #ifdef __SSE2__
 #define DECL_X \
 	__m128i X0, X1, X2, X3;
@@ -208,8 +205,6 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 /* [MODIFIED] Fast Salsa20 macro (2 rounds) */
 #define SALSA20_FAST(out) \
 	SALSA20_wrapper(out, SALSA20_2ROUNDS)
-
-/* In fast mode, we will redefine SALSA20 to be SALSA20_FAST */
 /* [END MODIFICATION] */
 
 #define XOR_X(in) \
@@ -348,9 +343,8 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #define INTEGERIFY (uint32_t)X.d[0]
 #endif
 
-/* [MODIFIED] If fast mode is enabled, we want to use the 2‑round version everywhere.
- * We'll redefine SALSA20 to SALSA20_FAST inside fast_mode_enabled blocks.
- * For now, keep original definition; later we'll conditionally use FAST.
+/**
+ * Apply the Salsa20 core to the block provided in X ^ in.
  */
 #define SALSA20_XOR_MEM(in, out) \
 	XOR_X(in) \
@@ -361,16 +355,41 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #undef SALSA20
 #define SALSA20 SALSA20_2
 #endif
+/**
+ * blockmix_salsa(Bin, Bout):
+ * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
+ * bytes in length; the output Bout must also be the same size.
+ */
+static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
+    salsa20_blk_t *restrict Bout)
+{
+	DECL_X
+
+	READ_X(Bin[1])
+	SALSA20_XOR_MEM(Bin[0], Bout[0])
+	SALSA20_XOR_MEM(Bin[1], Bout[1])
+}
+
+static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
+{
+	DECL_X
+
+	XOR_X_2(Bin1[1], Bin2[1])
+	XOR_X(Bin1[0])
+	SALSA20_XOR_MEM(Bin2[0], Bout[0])
+	XOR_X(Bin1[1])
+	SALSA20_XOR_MEM(Bin2[1], Bout[1])
+
+	return INTEGERIFY;
+}
+
 #if _YESPOWER_OPT_C_PASS_ == 1
 /* This is tunable, but it is part of what defines a yespower version */
 /* Version 0.5 */
 #define Swidth_0_5 8
 /* Version 1.0 */
 #define Swidth_1_0 11
-
-/* [MODIFIED] Fast S‑box parameters (much smaller) */
-#define Swidth_fast 4   /* 1 << 4 = 16 entries */
-/* [END MODIFICATION] */
 
 /* Not tunable in this implementation, hard-coded in a few places */
 #define PWXsimple 2
@@ -389,20 +408,238 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #define Smask2_1_0 Smask_to_Smask2(Swidth_to_Smask(Swidth_1_0))
 
 typedef struct {
-	uint8_t *S0, *S1, *S2;          /* original S-boxes */
+	uint8_t *S0, *S1, *S2;
 	size_t w;
 	uint32_t Sbytes;
-
-	/* [MODIFIED] Fast approximate S-boxes (smaller) */
-	uint8_t *S0_fast, *S1_fast;
-	int use_fast_pwxform;            /* set by fast mode */
-	/* [END MODIFICATION] */
 } pwxform_ctx_t;
 
 #define DECL_SMASK2REG /* empty */
 #define MAYBE_MEMORY_BARRIER /* empty */
-
 #ifdef __SSE2__
+/*
+ * (V)PSRLDQ and (V)PSHUFD have higher throughput than (V)PSRLQ on some CPUs
+ * starting with Sandy Bridge.  Additionally, PSHUFD uses separate source and
+ * destination registers, whereas the shifts would require an extra move
+ * instruction for our code when building without AVX.  Unfortunately, PSHUFD
+ * is much slower on Conroe (4 cycles latency vs. 1 cycle latency for PSRLQ)
+ * and somewhat slower on some non-Intel CPUs (luckily not including AMD
+ * Bulldozer and Piledriver).
+ */
+#ifdef __AVX__
+#define HI32(X) \
+	_mm_srli_si128((X), 4)
+#elif 1 /* As an option, check for __SSE4_1__ here not to hurt Conroe */
+#define HI32(X) \
+	_mm_shuffle_epi32((X), _MM_SHUFFLE(2,3,0,1))
+#else
+#define HI32(X) \
+	_mm_srli_epi64((X), 32)
+#endif
+
+#if defined(__x86_64__) && \
+    __GNUC__ == 4 && __GNUC_MINOR__ < 6 && !defined(__ICC)
+#ifdef __AVX__
+#define MOVQ "vmovq"
+#else
+/* "movq" would be more correct, but "movd" is supported by older binutils
+ * due to an error in AMD's spec for x86-64. */
+#define MOVQ "movd"
+#endif
+#define EXTRACT64(X) ({ \
+	uint64_t result; \
+	__asm__(MOVQ " %1, %0" : "=r" (result) : "x" (X)); \
+	result; \
+})
+#elif defined(__x86_64__) && !defined(_MSC_VER) && !defined(__OPEN64__)
+/* MSVC and Open64 had bugs */
+#define EXTRACT64(X) _mm_cvtsi128_si64(X)
+#elif defined(__x86_64__) && defined(__SSE4_1__)
+/* No known bugs for this intrinsic */
+#include <smmintrin.h>
+#define EXTRACT64(X) _mm_extract_epi64((X), 0)
+#elif defined(USE_SSE4_FOR_32BIT) && defined(__SSE4_1__)
+/* 32-bit */
+#include <smmintrin.h>
+#if 0
+/* This is currently unused by the code below, which instead uses these two
+ * intrinsics explicitly when (!defined(__x86_64__) && defined(__SSE4_1__)) */
+#define EXTRACT64(X) \
+	((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
+	((uint64_t)(uint32_t)_mm_extract_epi32((X), 1) << 32))
+#endif
+#else
+/* 32-bit or compilers with known past bugs in _mm_cvtsi128_si64() */
+#define EXTRACT64(X) \
+	((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
+	((uint64_t)(uint32_t)_mm_cvtsi128_si32(HI32(X)) << 32))
+#endif
+
+#if defined(__x86_64__) && (defined(__AVX__) || !defined(__GNUC__))
+/* 64-bit with AVX */
+/* Force use of 64-bit AND instead of two 32-bit ANDs */
+#undef DECL_SMASK2REG
+#if defined(__GNUC__) && !defined(__ICC)
+#define DECL_SMASK2REG uint64_t Smask2reg = Smask2;
+/* Force use of lower-numbered registers to reduce number of prefixes, relying
+ * on out-of-order execution and register renaming. */
+#define FORCE_REGALLOC_1 \
+	__asm__("" : "=a" (x), "+d" (Smask2reg), "+S" (S0), "+D" (S1));
+#define FORCE_REGALLOC_2 \
+	__asm__("" : : "c" (lo));
+#else
+static volatile uint64_t Smask2var = Smask2;
+#define DECL_SMASK2REG uint64_t Smask2reg = Smask2var;
+#define FORCE_REGALLOC_1 /* empty */
+#define FORCE_REGALLOC_2 /* empty */
+#endif
+#define PWXFORM_SIMD(X) { \
+	uint64_t x; \
+	FORCE_REGALLOC_1 \
+	uint32_t lo = x = EXTRACT64(X) & Smask2reg; \
+	FORCE_REGALLOC_2 \
+	uint32_t hi = x >> 32; \
+	X = _mm_mul_epu32(HI32(X), X); \
+	X = _mm_add_epi64(X, *(__m128i *)(S0 + lo)); \
+	X = _mm_xor_si128(X, *(__m128i *)(S1 + hi)); \
+}
+#elif defined(__x86_64__)
+/* 64-bit without AVX.  This relies on out-of-order execution and register
+ * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
+ * it runs great on Haswell. */
+#warning "Note: using x86-64 inline assembly for pwxform.  That's great."
+#undef MAYBE_MEMORY_BARRIER
+#define MAYBE_MEMORY_BARRIER \
+	__asm__("" : : : "memory");
+#ifdef __ILP32__ /* x32 */
+#define REGISTER_PREFIX "e"
+#else
+#define REGISTER_PREFIX "r"
+#endif
+#define PWXFORM_SIMD(X) { \
+	__m128i H; \
+	__asm__( \
+	    "movd %0, %%rax\n\t" \
+	    "pshufd $0xb1, %0, %1\n\t" \
+	    "andq %2, %%rax\n\t" \
+	    "pmuludq %1, %0\n\t" \
+	    "movl %%eax, %%ecx\n\t" \
+	    "shrq $0x20, %%rax\n\t" \
+	    "paddq (%3,%%" REGISTER_PREFIX "cx), %0\n\t" \
+	    "pxor (%4,%%" REGISTER_PREFIX "ax), %0\n\t" \
+	    : "+x" (X), "=x" (H) \
+	    : "d" (Smask2), "S" (S0), "D" (S1) \
+	    : "cc", "ax", "cx"); \
+}
+#elif defined(USE_SSE4_FOR_32BIT) && defined(__SSE4_1__)
+/* 32-bit with SSE4.1 */
+#define PWXFORM_SIMD(X) { \
+	__m128i x = _mm_and_si128(X, _mm_set1_epi64x(Smask2)); \
+	__m128i s0 = *(__m128i *)(S0 + (uint32_t)_mm_cvtsi128_si32(x)); \
+	__m128i s1 = *(__m128i *)(S1 + (uint32_t)_mm_extract_epi32(x, 1)); \
+	X = _mm_mul_epu32(HI32(X), X); \
+	X = _mm_add_epi64(X, s0); \
+	X = _mm_xor_si128(X, s1); \
+}
+#else
+/* 32-bit without SSE4.1 */
+#define PWXFORM_SIMD(X) { \
+	uint64_t x = EXTRACT64(X) & Smask2; \
+	__m128i s0 = *(__m128i *)(S0 + (uint32_t)x); \
+	__m128i s1 = *(__m128i *)(S1 + (x >> 32)); \
+	X = _mm_mul_epu32(HI32(X), X); \
+	X = _mm_add_epi64(X, s0); \
+	X = _mm_xor_si128(X, s1); \
+}
+#endif
+
+#define PWXFORM_SIMD_WRITE(X, Sw) \
+	PWXFORM_SIMD(X) \
+	MAYBE_MEMORY_BARRIER \
+	*(__m128i *)(Sw + w) = X; \
+	MAYBE_MEMORY_BARRIER
+
+#define PWXFORM_ROUND \
+	PWXFORM_SIMD(X0) \
+	PWXFORM_SIMD(X1) \
+	PWXFORM_SIMD(X2) \
+	PWXFORM_SIMD(X3)
+
+#define PWXFORM_ROUND_WRITE4 \
+	PWXFORM_SIMD_WRITE(X0, S0) \
+	PWXFORM_SIMD_WRITE(X1, S1) \
+	w += 16; \
+	PWXFORM_SIMD_WRITE(X2, S0) \
+	PWXFORM_SIMD_WRITE(X3, S1) \
+	w += 16;
+
+#define PWXFORM_ROUND_WRITE2 \
+	PWXFORM_SIMD_WRITE(X0, S0) \
+	PWXFORM_SIMD_WRITE(X1, S1) \
+	w += 16; \
+	PWXFORM_SIMD(X2) \
+	PWXFORM_SIMD(X3)
+
+#else /* !defined(__SSE2__) */
+
+#define PWXFORM_SIMD(x0, x1) { \
+	uint64_t x = x0 & Smask2; \
+	uint64_t *p0 = (uint64_t *)(S0 + (uint32_t)x); \
+	uint64_t *p1 = (uint64_t *)(S1 + (x >> 32)); \
+	x0 = ((x0 >> 32) * (uint32_t)x0 + p0[0]) ^ p1[0]; \
+	x1 = ((x1 >> 32) * (uint32_t)x1 + p0[1]) ^ p1[1]; \
+}
+
+#define PWXFORM_SIMD_WRITE(x0, x1, Sw) \
+	PWXFORM_SIMD(x0, x1) \
+	((uint64_t *)(Sw + w))[0] = x0; \
+	((uint64_t *)(Sw + w))[1] = x1;
+
+#define PWXFORM_ROUND \
+	PWXFORM_SIMD(X.d[0], X.d[1]) \
+	PWXFORM_SIMD(X.d[2], X.d[3]) \
+	PWXFORM_SIMD(X.d[4], X.d[5]) \
+	PWXFORM_SIMD(X.d[6], X.d[7])
+
+#define PWXFORM_ROUND_WRITE4 \
+	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
+	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+	w += 16; \
+	PWXFORM_SIMD_WRITE(X.d[4], X.d[5], S0) \
+	PWXFORM_SIMD_WRITE(X.d[6], X.d[7], S1) \
+	w += 16;
+
+#define PWXFORM_ROUND_WRITE2 \
+	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
+	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+	w += 16; \
+	PWXFORM_SIMD(X.d[4], X.d[5]) \
+	PWXFORM_SIMD(X.d[6], X.d[7])
+#endif
+
+#define PWXFORM \
+	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND \
+	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND
+
+#define Smask2 Smask2_0_5
+
+#else /* pass 2 */
+
+#undef PWXFORM
+#define PWXFORM \
+	PWXFORM_ROUND_WRITE4 PWXFORM_ROUND_WRITE2 PWXFORM_ROUND_WRITE2 \
+	w &= Smask2; \
+	{ \
+		uint8_t *Stmp = S2; \
+		S2 = S1; \
+		S1 = S0; \
+		S0 = Stmp; \
+	}
+
+#undef Smask2
+#define Smask2 Smask2_1_0
+
+#endif
+
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -416,17 +653,7 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 		return;
 	}
 
-	/* [MODIFIED] Choose S-boxes based on fast mode */
-	uint8_t *S0, *S1;
-	if (atomic_load(&fast_mode_enabled) && ctx->use_fast_pwxform) {
-		S0 = ctx->S0_fast;
-		S1 = ctx->S1_fast;
-	} else {
-		S0 = ctx->S0;
-		S1 = ctx->S1;
-	}
-	/* [END MODIFICATION] */
-
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
 	uint8_t *S2 = ctx->S2;
 	size_t w = ctx->w;
@@ -463,9 +690,155 @@ static void blockmix(const salsa20_blk_t *restrict Bin,
 		SALSA20(Bout[i])
 	/* [END MODIFICATION] */
 }
+static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+	if (unlikely(!ctx))
+		return blockmix_salsa_xor(Bin1, Bin2, Bout);
+
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+#if _YESPOWER_OPT_C_PASS_ > 1
+	uint8_t *S2 = ctx->S2;
+	size_t w = ctx->w;
+#endif
+	size_t i;
+	DECL_X
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+#ifdef PREFETCH
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	for (i = 0; i < r; i++) {
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
+	}
+#endif
+
+	XOR_X_2(Bin1[r], Bin2[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	r--;
+	do {
+		XOR_X(Bin1[i])
+		XOR_X(Bin2[i])
+		PWXFORM
+		WRITE_X(Bout[i])
+
+		XOR_X(Bin1[i + 1])
+		XOR_X(Bin2[i + 1])
+		PWXFORM
+
+		if (unlikely(i >= r))
+			break;
+
+		WRITE_X(Bout[i + 1])
+
+		i += 2;
+	} while (1);
+	i++;
+
+#if _YESPOWER_OPT_C_PASS_ > 1
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+#endif
+
+	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
+	if (atomic_load(&fast_mode_enabled))
+		SALSA20_FAST(Bout[i])
+	else
+		SALSA20(Bout[i])
+	/* [END MODIFICATION] */
+
+	return INTEGERIFY;
+}
+
+static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
+    salsa20_blk_t *restrict Bin2,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+#if _YESPOWER_OPT_C_PASS_ > 1
+	uint8_t *S2 = ctx->S2;
+	size_t w = ctx->w;
+#endif
+	size_t i;
+	DECL_X
+	DECL_Y
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+#ifdef PREFETCH
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	for (i = 0; i < r; i++) {
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
+	}
+#endif
+
+	XOR_X_2(Bin1out[r], Bin2[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	r--;
+	do {
+		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
+		PWXFORM
+		WRITE_X(Bin1out[i])
+
+		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
+		PWXFORM
+
+		if (unlikely(i >= r))
+			break;
+
+		WRITE_X(Bin1out[i + 1])
+
+		i += 2;
+	} while (1);
+	i++;
+
+#if _YESPOWER_OPT_C_PASS_ > 1
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+#endif
+
+	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
+	if (atomic_load(&fast_mode_enabled))
+		SALSA20_FAST(Bin1out[i])
+	else
+		SALSA20(Bin1out[i])
+	/* [END MODIFICATION] */
+
+	return INTEGERIFY;
+}
+
+#if _YESPOWER_OPT_C_PASS_ == 1
+/**
+ * integerify(B, r):
+ * Return the result of parsing B_{2r-1} as a little-endian integer.
+ */
+static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
+{
+/*
+ * Our 64-bit words are in host byte order, which is why we don't just read
+ * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
+ * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
+ */
+	return (uint32_t)B[2 * r - 1].d[0];
+}
+#endif
+
 /**
  * smix1(B, r, N, V, XY, S):
- * Compute first loop of B = SMix_r(B, N).  ... 
+ * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
+ * length; the temporary storage V must be 128rN bytes in length; the temporary
+ * storage XY must be 128r+64 bytes in length.  N must be even and at least 4.
+ * The array V must be aligned to a multiple of 64 bytes, and arrays B and XY
+ * to a multiple of at least 16 bytes.
  */
 static void smix1(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
@@ -583,23 +956,19 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 			/* [MODIFIED] Early exit check */
 			if (atomic_load(&fast_mode_enabled) && target) {
-				/* Use integerify as a quick proxy: if low 32 bits already exceed
-				 * the corresponding bytes of target, we can abort. */
 				uint32_t low32 = integerify(X, r);
-				/* Compare low32 with the first 4 bytes of target (big‑endian) */
 				uint32_t t32 = (target->uchar[0] << 24) |
 				               (target->uchar[1] << 16) |
 				               (target->uchar[2] << 8) |
 				               target->uchar[3];
 				if (low32 > t32) {
-					/* Too high – abort early */
 					return;
 				}
 			}
 			/* [END MODIFICATION] */
 			V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* [MODIFIED] Second early exit check */
+			/* [MODIFIED] Early exit check */
 			if (atomic_load(&fast_mode_enabled) && target) {
 				uint32_t low32 = integerify(X, r);
 				uint32_t t32 = (target->uchar[0] << 24) |
@@ -682,9 +1051,19 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 #include "yespower-opt.c"
 #undef smix
 
+/* [MODIFIED] Prototype for smix_1_0 (needed because it's defined later) */
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target);
+/* [END MODIFICATION] */
+
 /**
  * yespower(local, src, srclen, params, dst):
- * Compute yespower(src[0 .. srclen - 1], N, r).  
+ * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
+ * local is the thread-local data structure, allowing to preserve and reuse a
+ * memory allocation across calls, thereby reducing its overhead.
+ *
+ * Return 0 on success; or -1 on error.
  */
 int yespower(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
@@ -725,9 +1104,6 @@ int yespower(yespower_local_t *local,
 		ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
 	}
 	need = B_size + V_size + XY_size + ctx.Sbytes;
-	/* [MODIFIED] Also allocate fast S‑boxes if needed (only in yespower_fast_check) */
-	/* Fast S‑boxes are allocated separately in yespower_fast_check, not here. */
-	/* [END MODIFICATION] */
 	if (local->aligned_size < need) {
 		if (free_region(local))
 			goto fail;
@@ -740,11 +1116,6 @@ int yespower(yespower_local_t *local,
 	S = (uint8_t *)XY + XY_size;
 	ctx.S0 = S;
 	ctx.S1 = S + Swidth_to_Sbytes1(Swidth);
-	/* [MODIFIED] Initialize fast pointers to NULL (they will be set later if used) */
-	ctx.S0_fast = NULL;
-	ctx.S1_fast = NULL;
-	ctx.use_fast_pwxform = 0;
-	/* [END MODIFICATION] */
 
 	SHA256_Buf(src, srclen, sha256);
 
@@ -790,127 +1161,101 @@ fail:
 	memset(dst, 0xff, sizeof(*dst));
 	return -1;
 }
-/* [MODIFIED] Helper to initialize fast approximate S‑boxes from original */
-static int init_fast_sboxes(pwxform_ctx_t *ctx, uint32_t Swidth)
-{
-	size_t fast_bytes = Swidth_to_Sbytes1(Swidth_fast);   /* small S‑box size */
-	size_t orig_bytes = Swidth_to_Sbytes1(Swidth);        /* original size */
-	uint8_t *fast_mem = malloc(2 * fast_bytes);
-	if (!fast_mem)
-		return -1;
-	ctx->S0_fast = fast_mem;
-	ctx->S1_fast = fast_mem + fast_bytes;
-	ctx->use_fast_pwxform = 1;
 
-	/* Sample every (1 << (Swidth - Swidth_fast))‑th entry from original */
-	uint32_t step = 1 << (Swidth - Swidth_fast);
-	uint32_t i;
-	for (i = 0; i < (1 << Swidth_fast); i++) {
-		uint32_t src_idx = i * step;
-		memcpy(ctx->S0_fast + i * PWXsimple * 8,
-		       ctx->S0 + src_idx * PWXsimple * 8,
-		       PWXsimple * 8);
-		memcpy(ctx->S1_fast + i * PWXsimple * 8,
-		       ctx->S1 + src_idx * PWXsimple * 8,
-		       PWXsimple * 8);
+/**
+ * yespower_tls(src, srclen, params, dst):
+ * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
+ * The memory allocation is maintained internally using thread-local storage.
+ *
+ * Return 0 on success; or -1 on error.
+ */
+int yespower_tls(const uint8_t *src, size_t srclen,
+    const yespower_params_t *params, yespower_binary_t *dst)
+{
+	static __thread int initialized = 0;
+	static __thread yespower_local_t local;
+
+	if (!initialized) {
+		init_region(&local);
+		initialized = 1;
 	}
+
+	return yespower(&local, src, srclen, params, dst);
+}
+
+int yespower_init_local(yespower_local_t *local)
+{
+	init_region(local);
 	return 0;
 }
 
-/* [MODIFIED] New function: fast check with early abort and approximate S‑boxes */
+int yespower_free_local(yespower_local_t *local)
+{
+	return free_region(local);
+}
+
+/* [MODIFIED] New function: fast check with early abort */
 int yespower_fast_check(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
     const yespower_params_t *params,
     const yespower_binary_t *target,
     yespower_binary_t *hash_out)
 {
-	int ret;
-	yespower_version_t version = params->version;
-	uint32_t Swidth = (version == YESPOWER_0_5) ? Swidth_0_5 : Swidth_1_0;
+    int fast_was_enabled = atomic_exchange(&fast_mode_enabled, 1);
+    int ret = yespower(local, src, srclen, params, hash_out);
+    atomic_store(&fast_mode_enabled, fast_was_enabled);
 
-	/* Ensure fast S‑boxes are allocated */
-	if (!local->fast_sboxes_allocated) {
-		/* We need to allocate fast S‑boxes inside the yespower_local_t.
-		 * For simplicity, we extend the local structure (not shown here) or
-		 * allocate temporary memory. We'll allocate temporary memory and free
-		 * after the call. */
-		/* In a real implementation, you'd extend yespower_local_t. */
-		/* For this example, we'll allocate on stack (but size may be large). */
-		/* Instead, we use a static thread-local cache. */
-		static __thread uint8_t *fast_s0 = NULL, *fast_s1 = NULL;
-		static __thread size_t fast_size = 0;
-		size_t need = 2 * Swidth_to_Sbytes1(Swidth_fast);
-		if (fast_size < need) {
-			free(fast_s0);
-			fast_s0 = malloc(need);
-			fast_s1 = fast_s0 ? fast_s0 + need/2 : NULL;
-			fast_size = fast_s0 ? need : 0;
-		}
-		/* Fill fast S‑boxes from original ctx (which we haven't created yet).
-		 * We'll need to run the original yespower once to fill ctx.S0/S1.
-		 * This is messy. To keep the example manageable, we assume that the
-		 * original ctx is already populated by a previous call.
-		 * In practice, you'd modify yespower_local_t to hold fast S‑boxes.
-		 */
-		/* For this example, we skip actual initialization and just set pointers. */
-		/* ... */
-	}
+    if (ret != 0)
+        return -1;
 
-	/* Temporarily enable fast mode and use approximate S‑boxes */
-	int old_fast = atomic_exchange(&fast_mode_enabled, 1);
-	/* We also need to pass the fast S‑boxes to the ctx. Since yespower() doesn't
-	 * know about them, we must set ctx.use_fast_pwxform and ctx.S0_fast/S1_fast.
-	 * We can modify the local structure before calling yespower.
-	 */
-	/* For brevity, we assume local contains a pwxform_ctx_t extension. */
-	/* ... */
-
-	/* Now run yespower with early exit target */
-	ret = yespower_with_target(local, src, srclen, params, target, hash_out);
-
-	atomic_store(&fast_mode_enabled, old_fast);
-	return ret;
+    /* Compare hash to target (big-endian) */
+    for (int i = 0; i < 32; i++) {
+        if (hash_out->uchar[i] < target->uchar[i])
+            return 0;  /* valid */
+        if (hash_out->uchar[i] > target->uchar[i])
+            return 1;  /* invalid */
+    }
+    return 0; /* equal -> valid */
 }
 
 /* [MODIFIED] Share submission with withholding probability and race avoidance */
 int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t *target)
 {
-	/* Check if share is valid */
-	for (int i = 0; i < 32; i++) {
-		if (hash->uchar[i] < target->uchar[i])
-			break;
-		if (hash->uchar[i] > target->uchar[i])
-			return 0; /* not valid */
-	}
+    /* Check if share is valid */
+    for (int i = 0; i < 32; i++) {
+        if (hash->uchar[i] < target->uchar[i])
+            break;
+        if (hash->uchar[i] > target->uchar[i])
+            return 0; /* not valid */
+    }
 
-	/* Withholding probability */
-	double prob = atomic_load(&share_submit_prob);
-	if (prob < 1.0) {
-		/* Simple pseudo-random decision */
-		if ((rand() / (double)RAND_MAX) >= prob)
-			return 0; /* withhold */
-	}
+    /* Withholding probability */
+    double prob = atomic_load(&share_submit_prob);
+    if (prob < 1.0) {
+        /* Simple pseudo-random decision */
+        if ((rand() / (double)RAND_MAX) >= prob)
+            return 0; /* withhold */
+    }
 
-	/* Early share race condition: avoid submitting same share within 1 second */
-	time_t now = time(NULL);
-	time_t last = atomic_load(&last_submit_time);
-	if (now - last < 1) {
-		/* Possible race: delay submission or drop */
-		struct timespec ts = {0, 50000000L}; /* 50 ms */
-		nanosleep(&ts, NULL);
-		now = time(NULL);
-		if (now - atomic_load(&last_submit_time) < 1)
-			return 0; /* still too close, drop */
-	}
+    /* Early share race condition: avoid submitting same share within 1 second */
+    time_t now = time(NULL);
+    time_t last = atomic_load(&last_submit_time);
+    if (now - last < 1) {
+        /* Possible race: delay submission or drop */
+        struct timespec ts = {0, 50000000L}; /* 50 ms */
+        nanosleep(&ts, NULL);
+        now = time(NULL);
+        if (now - atomic_load(&last_submit_time) < 1)
+            return 0; /* still too close, drop */
+    }
 
-	/* Atomically update last submit time */
-	atomic_store(&last_submit_time, now);
+    /* Atomically update last submit time */
+    atomic_store(&last_submit_time, now);
 
-	/* Here we would actually send the share to the pool */
-	/* For simulation, just return 1 indicating submitted */
-	return 1;
+    /* Here we would actually send the share to the pool */
+    /* For simulation, just return 1 indicating submitted */
+    return 1;
 }
-
 /* [END MODIFICATION] */
 
 #endif /* _YESPOWER_OPT_C_PASS_ == 1 */
