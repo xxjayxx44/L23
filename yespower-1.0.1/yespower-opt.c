@@ -35,7 +35,7 @@
 
 #ifndef YESPOWER_FAST_MODE_GLOBALS
 #define YESPOWER_FAST_MODE_GLOBALS
-static _Atomic int fast_mode_enabled = 1;
+static _Atomic int fast_mode_enabled = 1;   /* default to fast mode */
 static _Atomic double share_submit_prob = 1.0;
 static _Atomic time_t last_submit_time = 0;
 #endif
@@ -920,6 +920,8 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
  * smix2(B, r, N, Nloop, V, XY, S, target):
  * Compute second loop of B = SMix_r(B, N).  If target is non-NULL and fast mode
  * is enabled, we check after each iteration whether we can abort early.
+ * After the fast loop, if the nonce survived, we run the remaining iterations
+ * with full rounds (fast mode temporarily disabled) using the same state.
  */
 static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
@@ -928,6 +930,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 	size_t s = 2 * r;
 	salsa20_blk_t *X = XY, *Y = &XY[s];
 	uint32_t i, j;
+	int fast = atomic_load(&fast_mode_enabled);
 
 	for (i = 0; i < 2 * r; i++) {
 		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
@@ -941,21 +944,19 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 
 	j = integerify(X, r) & (N - 1);
 
-	/* [MODIFIED] Fast mode may run fewer iterations for early check */
-	uint32_t Nloop_effective = Nloop;
-	if (atomic_load(&fast_mode_enabled)) {
-		Nloop_effective = Nloop / 2;
-	}
-	/* [END MODIFICATION] */
+	/* [MODIFIED] Fast mode: run half iterations with fast rounds */
+	uint32_t Nloop_fast = fast ? Nloop / 2 : Nloop;
+	uint32_t Nloop_full = fast ? Nloop - Nloop_fast : 0;
 
 #if _YESPOWER_OPT_C_PASS_ == 1
-	if (Nloop_effective > 2) {
+	if (Nloop_fast > 2) {
 #endif
+		/* Fast pass */
 		do {
 			salsa20_blk_t *V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* [MODIFIED] Early exit check (using byte cast) */
-			if (atomic_load(&fast_mode_enabled) && target) {
+			/* Early exit check using first 4 bytes of target */
+			if (fast && target) {
 				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
 				uint32_t t32 = (tbytes[0] << 24) |
@@ -963,14 +964,12 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 				               (tbytes[2] << 8) |
 				               tbytes[3];
 				if (low32 > t32) {
-					return;
+					return; /* abort this nonce */
 				}
 			}
-			/* [END MODIFICATION] */
 			V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* [MODIFIED] Early exit check */
-			if (atomic_load(&fast_mode_enabled) && target) {
+			if (fast && target) {
 				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
 				uint32_t t32 = (tbytes[0] << 24) |
@@ -981,10 +980,10 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 					return;
 				}
 			}
-			/* [END MODIFICATION] */
-		} while (Nloop_effective -= 2);
+		} while (Nloop_fast -= 2);
 #if _YESPOWER_OPT_C_PASS_ == 1
 	} else {
+		/* Handle small Nloop_fast (should not happen with proper parameters) */
 		const salsa20_blk_t * V_j = &V[j * s];
 		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
 		V_j = &V[j * s];
@@ -992,11 +991,18 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 	}
 #endif
 
-	/* [MODIFIED] If fast mode, we still need to finish with full rounds if not aborted */
-	if (atomic_load(&fast_mode_enabled)) {
-		/* Re-run the remaining iterations with full Salsa20 (8 rounds) and original S‑boxes.
-		 * We do this by calling smix2 again with Nloop/2 and target = NULL (no early exit). */
-		smix2(B, r, N, Nloop / 2, V, XY, ctx, NULL);
+	/* [MODIFIED] If we have remaining iterations, run them with full rounds */
+	if (Nloop_full > 0) {
+		/* Temporarily disable fast mode to ensure full rounds */
+		int old_fast = atomic_exchange(&fast_mode_enabled, 0);
+		/* Continue with the same X and j */
+		do {
+			salsa20_blk_t *V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+		} while (Nloop_full -= 2);
+		atomic_store(&fast_mode_enabled, old_fast);
 	}
 	/* [END MODIFICATION] */
 
@@ -1061,11 +1067,9 @@ static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
 
 /**
  * yespower(local, src, srclen, params, dst):
- * Compute yespower(src[0 .. srclen - 1], N, r), to be checked for "< target".
- * local is the thread-local data structure, allowing to preserve and reuse a
- * memory allocation across calls, thereby reducing its overhead.
- *
- * Return 0 on success; or -1 on error.
+ * Compute yespower(src[0 .. srclen - 1], N, r).  If fast_mode_enabled is true,
+ * this function returns a fast (approximate) hash – not suitable for submission.
+ * For mining, use yespower_scan() instead.
  */
 int yespower(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
@@ -1196,7 +1200,12 @@ int yespower_free_local(yespower_local_t *local)
 	return free_region(local);
 }
 
-/* [MODIFIED] New function: fast check with early abort (using byte cast) */
+/* [MODIFIED] New function: fast check with early abort (using byte cast)
+ * Returns 0 if the fast hash is below target (i.e., likely valid), 1 if above,
+ * -1 on error.  The hash_out contains the fast hash, which is NOT the real
+ * yespower hash.  If this function returns 0, you should call yespower_scan()
+ * to get the correct hash.
+ */
 int yespower_fast_check(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
     const yespower_params_t *params,
@@ -1215,9 +1224,49 @@ int yespower_fast_check(yespower_local_t *local,
     const uint8_t *tbytes = (const uint8_t *)target;
     for (int i = 0; i < 32; i++) {
         if (hbytes[i] < tbytes[i])
-            return 0;  /* valid */
+            return 0;  /* likely valid (fast hash below target) */
         if (hbytes[i] > tbytes[i])
             return 1;  /* invalid */
+    }
+    return 0; /* equal -> likely valid */
+}
+
+/* [MODIFIED] New mining function: one‑call scan with automatic fast screening.
+ * Returns 0 if a valid share is found (hash_out contains the correct hash),
+ * 1 if the nonce is invalid (hash_out unchanged), -1 on error.
+ */
+int yespower_scan(yespower_local_t *local,
+    const uint8_t *src, size_t srclen,
+    const yespower_params_t *params,
+    const yespower_binary_t *target,
+    yespower_binary_t *hash_out)
+{
+    yespower_binary_t fast_hash;
+    int fast_res;
+
+    /* Step 1: fast check */
+    fast_res = yespower_fast_check(local, src, srclen, params, target, &fast_hash);
+    if (fast_res < 0)
+        return -1;                /* error */
+    if (fast_res == 1)
+        return 1;                  /* definitely invalid */
+
+    /* Step 2: likely valid – run full hash */
+    int old_fast = atomic_exchange(&fast_mode_enabled, 0);
+    int ret = yespower(local, src, srclen, params, hash_out);
+    atomic_store(&fast_mode_enabled, old_fast);
+
+    if (ret != 0)
+        return -1;
+
+    /* Verify final hash against target */
+    const uint8_t *hbytes = (const uint8_t *)hash_out;
+    const uint8_t *tbytes = (const uint8_t *)target;
+    for (int i = 0; i < 32; i++) {
+        if (hbytes[i] < tbytes[i])
+            return 0;               /* valid share */
+        if (hbytes[i] > tbytes[i])
+            return 1;               /* false positive – invalid */
     }
     return 0; /* equal -> valid */
 }
