@@ -29,16 +29,26 @@
  */
 #undef USE_SSE4_FOR_32BIT
 
-/* [MODIFIED] Add atomic headers and fast‑mode global variables */
+/* [MODIFIED] Atomic headers and fast‑mode global variables */
 #include <stdatomic.h>
 #include <time.h>
+#include <stdlib.h>   /* for rand() */
 
 #ifndef YESPOWER_FAST_MODE_GLOBALS
 #define YESPOWER_FAST_MODE_GLOBALS
-static _Atomic int fast_mode_enabled = 1;   /* default to fast mode */
+static _Atomic int fast_mode_enabled = 0;   /* default off – yespower returns correct hash */
 static _Atomic double share_submit_prob = 1.0;
-static _Atomic time_t last_submit_time = 0;
 #endif
+
+/* [MODIFIED] Withheld shares queue */
+#define MAX_WITHHELD 1024
+typedef struct {
+    yespower_binary_t hash;
+    time_t stored_at;
+} withheld_share_t;
+static withheld_share_t withheld_queue[MAX_WITHHELD];
+static _Atomic int withheld_head = 0;
+static _Atomic int withheld_tail = 0;
 /* [END MODIFICATION] */
 
 #ifdef __SSE2__
@@ -415,6 +425,7 @@ typedef struct {
 
 #define DECL_SMASK2REG /* empty */
 #define MAYBE_MEMORY_BARRIER /* empty */
+
 #ifdef __SSE2__
 /*
  * (V)PSRLDQ and (V)PSHUFD have higher throughput than (V)PSRLQ on some CPUs
@@ -913,9 +924,8 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 		for (k = 0; k < 16; k++)
 			le32enc(&tmp->w[k], src->w[k]);
 		salsa20_simd_unshuffle(tmp, dst);
+	       }
 	}
-}
-
 /**
  * smix2(B, r, N, Nloop, V, XY, S, target):
  * Compute second loop of B = SMix_r(B, N).  If target is non-NULL and fast mode
@@ -955,28 +965,31 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 		do {
 			salsa20_blk_t *V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* Early exit check using first 4 bytes of target */
+			/* [MODIFIED] Aggressive early exit: compare first 8 bytes (two 32-bit words) */
 			if (fast && target) {
 				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
-				uint32_t t32 = (tbytes[0] << 24) |
-				               (tbytes[1] << 16) |
-				               (tbytes[2] << 8) |
-				               tbytes[3];
-				if (low32 > t32) {
+				uint32_t next32 = (uint32_t)(X->d[0] >> 32);  /* second word */
+				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
+				                 (tbytes[2] << 8) | tbytes[3];
+				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
+				                  (tbytes[6] << 8) | tbytes[7];
+				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
 					return; /* abort this nonce */
 				}
 			}
+			/* [END MODIFICATION] */
 			V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 			if (fast && target) {
 				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
-				uint32_t t32 = (tbytes[0] << 24) |
-				               (tbytes[1] << 16) |
-				               (tbytes[2] << 8) |
-				               tbytes[3];
-				if (low32 > t32) {
+				uint32_t next32 = (uint32_t)(X->d[0] >> 32);
+				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
+				                 (tbytes[2] << 8) | tbytes[3];
+				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
+				                  (tbytes[6] << 8) | tbytes[7];
+				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
 					return;
 				}
 			}
@@ -1016,6 +1029,7 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 		salsa20_simd_unshuffle(tmp, dst);
 	}
 }
+
 /**
  * smix(B, r, N, V, XY, S, target):
  * Compute B = SMix_r(B, N).  If target is non-NULL and fast mode is enabled,
@@ -1044,7 +1058,6 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 		smix2(B, r, N, 2, V, XY, ctx, target);
 #endif
 }
-
 #if _YESPOWER_OPT_C_PASS_ == 1
 #undef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 2
@@ -1067,9 +1080,9 @@ static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
 
 /**
  * yespower(local, src, srclen, params, dst):
- * Compute yespower(src[0 .. srclen - 1], N, r).  If fast_mode_enabled is true,
- * this function returns a fast (approximate) hash – not suitable for submission.
- * For mining, use yespower_scan() instead.
+ * Compute yespower(src[0 .. srclen - 1], N, r).  This function always returns
+ * the correct full hash (fast mode is off by default).  For mining with fast
+ * screening, use yespower_scan() instead.
  */
 int yespower(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
@@ -1200,35 +1213,37 @@ int yespower_free_local(yespower_local_t *local)
 	return free_region(local);
 }
 
-/* [MODIFIED] New function: fast check with early abort (using byte cast)
- * Returns 0 if the fast hash is below target (i.e., likely valid), 1 if above,
- * -1 on error.  The hash_out contains the fast hash, which is NOT the real
- * yespower hash.  If this function returns 0, you should call yespower_scan()
- * to get the correct hash.
- */
-int yespower_fast_check(yespower_local_t *local,
-    const uint8_t *src, size_t srclen,
-    const yespower_params_t *params,
-    const yespower_binary_t *target,
-    yespower_binary_t *hash_out)
-{
-    int fast_was_enabled = atomic_exchange(&fast_mode_enabled, 1);
-    int ret = yespower(local, src, srclen, params, hash_out);
-    atomic_store(&fast_mode_enabled, fast_was_enabled);
-
-    if (ret != 0)
-        return -1;
-
-    /* Compare hash to target (big-endian) */
-    const uint8_t *hbytes = (const uint8_t *)hash_out;
-    const uint8_t *tbytes = (const uint8_t *)target;
-    for (int i = 0; i < 32; i++) {
-        if (hbytes[i] < tbytes[i])
-            return 0;  /* likely valid (fast hash below target) */
-        if (hbytes[i] > tbytes[i])
-            return 1;  /* invalid */
+/* [MODIFIED] Withheld shares queue functions */
+static int push_withheld_share(const yespower_binary_t *hash) {
+    int tail = atomic_load(&withheld_tail);
+    int next_tail = (tail + 1) % MAX_WITHHELD;
+    if (next_tail == atomic_load(&withheld_head)) {
+        return -1; /* queue full */
     }
-    return 0; /* equal -> likely valid */
+    withheld_queue[tail].hash = *hash;
+    withheld_queue[tail].stored_at = time(NULL);
+    atomic_store(&withheld_tail, next_tail);
+    return 0;
+}
+
+/* Release shares that have been held for at least min_hold seconds.
+ * Returns number of shares released (copied into releases array).
+ */
+int yespower_release_shares(yespower_binary_t *releases, int max_releases, int min_hold) {
+    int released = 0;
+    time_t now = time(NULL);
+    int head = atomic_load(&withheld_head);
+    int tail = atomic_load(&withheld_tail);
+    while (head != tail && released < max_releases) {
+        if (now - withheld_queue[head].stored_at >= min_hold) {
+            releases[released++] = withheld_queue[head].hash;
+            head = (head + 1) % MAX_WITHHELD;
+        } else {
+            break; /* queue is in order, older first */
+        }
+    }
+    atomic_store(&withheld_head, head);
+    return released;
 }
 
 /* [MODIFIED] New mining function: one‑call scan with automatic fast screening.
@@ -1245,14 +1260,32 @@ int yespower_scan(yespower_local_t *local,
     int fast_res;
 
     /* Step 1: fast check */
-    fast_res = yespower_fast_check(local, src, srclen, params, target, &fast_hash);
-    if (fast_res < 0)
-        return -1;                /* error */
-    if (fast_res == 1)
-        return 1;                  /* definitely invalid */
+    int old_fast = atomic_exchange(&fast_mode_enabled, 1);
+    fast_res = yespower(local, src, srclen, params, &fast_hash);
+    atomic_store(&fast_mode_enabled, old_fast);
+
+    if (fast_res != 0)
+        return -1;
+
+    /* Compare first 8 bytes of fast hash with target */
+    const uint8_t *hbytes = (const uint8_t *)&fast_hash;
+    const uint8_t *tbytes = (const uint8_t *)target;
+    int cmp = 0;
+    for (int i = 0; i < 8; i++) {
+        if (hbytes[i] < tbytes[i]) {
+            cmp = -1;
+            break;
+        }
+        if (hbytes[i] > tbytes[i]) {
+            cmp = 1;
+            break;
+        }
+    }
+    if (cmp > 0)
+        return 1;  /* definitely invalid */
 
     /* Step 2: likely valid – run full hash */
-    int old_fast = atomic_exchange(&fast_mode_enabled, 0);
+    old_fast = atomic_exchange(&fast_mode_enabled, 0);
     int ret = yespower(local, src, srclen, params, hash_out);
     atomic_store(&fast_mode_enabled, old_fast);
 
@@ -1260,8 +1293,7 @@ int yespower_scan(yespower_local_t *local,
         return -1;
 
     /* Verify final hash against target */
-    const uint8_t *hbytes = (const uint8_t *)hash_out;
-    const uint8_t *tbytes = (const uint8_t *)target;
+    hbytes = (const uint8_t *)hash_out;
     for (int i = 0; i < 32; i++) {
         if (hbytes[i] < tbytes[i])
             return 0;               /* valid share */
@@ -1271,7 +1303,7 @@ int yespower_scan(yespower_local_t *local,
     return 0; /* equal -> valid */
 }
 
-/* [MODIFIED] Share submission with withholding probability and race avoidance (using byte cast) */
+/* [MODIFIED] Share submission with withholding probability and strategic release */
 int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t *target)
 {
     const uint8_t *hbytes = (const uint8_t *)hash;
@@ -1285,28 +1317,15 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
             return 0; /* not valid */
     }
 
-    /* Withholding probability */
+    /* Withholding probability – if withheld, push to queue */
     double prob = atomic_load(&share_submit_prob);
     if (prob < 1.0) {
-        /* Simple pseudo-random decision */
-        if ((rand() / (double)RAND_MAX) >= prob)
-            return 0; /* withhold */
+        if ((rand() / (double)RAND_MAX) >= prob) {
+            if (push_withheld_share(hash) == 0)
+                return 0; /* withheld */
+            /* if queue full, fall through and submit anyway */
+        }
     }
-
-    /* Early share race condition: avoid submitting same share within 1 second */
-    time_t now = time(NULL);
-    time_t last = atomic_load(&last_submit_time);
-    if (now - last < 1) {
-        /* Possible race: delay submission or drop */
-        struct timespec ts = {0, 50000000L}; /* 50 ms */
-        nanosleep(&ts, NULL);
-        now = time(NULL);
-        if (now - atomic_load(&last_submit_time) < 1)
-            return 0; /* still too close, drop */
-    }
-
-    /* Atomically update last submit time */
-    atomic_store(&last_submit_time, now);
 
     /* Here we would actually send the share to the pool */
     /* For simulation, just return 1 indicating submitted */
