@@ -96,7 +96,13 @@ static struct {
         .rejected_count = 0,
         .target_success_rate = 0.90               /* Target 90% success rate */
     },
-    .stats = {0},
+    .stats = {
+        .validation_counts = {0},
+        .success_counts = {0},
+        .avg_time = {0.0},
+        .last_height = 0,
+        .best_order = 0
+    },
     .enable_bias = 1,                             /* ENABLED with optimal settings */
     .adaptive_validation = 1,                     /* ENABLED: Auto-select best strategy */
     .enable_consensus_cache = 1,                   /* ENABLED: Cache valid solutions */
@@ -132,6 +138,7 @@ static const yespower_params_t* get_params_for_height(uint32_t height) {
     
     return default_params;
 }
+
 /* Update validation statistics */
 static void update_validation_stats(validation_order_t order, 
                                     int success, 
@@ -406,7 +413,6 @@ done:
     
     return result;
 }
-
 /* Enhanced hash function with parameter validation */
 static int enhanced_yespower_hash(const uint8_t* data, size_t datalen,
                                   const yespower_params_t* params,
@@ -433,6 +439,7 @@ static int enhanced_yespower_hash(const uint8_t* data, size_t datalen,
     
     return ret;
 }
+
 int scanhash_ytn_yespower(int thr_id, uint32_t *pdata,
     const uint32_t *ptarget,
     uint32_t max_nonce, unsigned long *hashes_done)
