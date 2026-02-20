@@ -38,6 +38,7 @@
 /* [MODIFIED] Include yespower.h early so that yespower_binary_t is defined */
 #include "yespower.h"
 
+/* [MODIFIED] Include platform.c only once at the top */
 #include "yespower-platform.c"
 
 #if _YESPOWER_OPT_C_PASS_ == 1
@@ -818,214 +819,213 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  */
 	return (uint32_t)B[2 * r - 1].d[0];
 }
+
 /**
- * blockmix_pwxform(Bin, Bout, r, S):
- * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
- * be 128r bytes in length; the output Bout must also be the same size.
+ * smix1(B, r, N, V, XY, S):
+ * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
+ * length; the temporary storage V must be 128rN bytes in length; the temporary
+ * storage XY must be 128r+64 bytes in length.  N must be even and at least 4.
+ * The array V must be aligned to a multiple of 64 bytes, and arrays B and XY
+ * to a multiple of at least 16 bytes.
  */
-static void blockmix(const salsa20_blk_t *restrict Bin,
-    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
+static void smix1(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
-	if (unlikely(!ctx)) {
-		blockmix_salsa(Bin, Bout);
-		return;
+	size_t s = 2 * r;
+	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
+	uint32_t i, j, n;
+
+	/* [MODIFIED] Fast mode: use only first 1/4 of V (hot region) */
+	uint32_t N_fast = N;
+	if (atomic_load(&fast_mode_enabled)) {
+		N_fast = N / 4;
 	}
-
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-#if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
-#endif
-	size_t i;
-	DECL_X
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-	READ_X(Bin[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	do {
-		XOR_X(Bin[i])
-		PWXFORM
-		if (unlikely(i >= r))
-			break;
-		WRITE_X(Bout[i])
-		i++;
-	} while (1);
-
-#if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
-#endif
-
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled, otherwise original */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bout[i])
-	else
-		SALSA20(Bout[i])
-	/* [END MODIFICATION] */
-}
-
-static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
-    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
-    size_t r, pwxform_ctx_t *restrict ctx)
-{
-	if (unlikely(!ctx))
-		return blockmix_salsa_xor(Bin1, Bin2, Bout);
-
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-#if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
-#endif
-	size_t i;
-	DECL_X
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-#ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
-	}
-#endif
-
-	XOR_X_2(Bin1[r], Bin2[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	r--;
-	do {
-		XOR_X(Bin1[i])
-		XOR_X(Bin2[i])
-		PWXFORM
-		WRITE_X(Bout[i])
-
-		XOR_X(Bin1[i + 1])
-		XOR_X(Bin2[i + 1])
-		PWXFORM
-
-		if (unlikely(i >= r))
-			break;
-
-		WRITE_X(Bout[i + 1])
-
-		i += 2;
-	} while (1);
-	i++;
-
-#if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
-#endif
-
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bout[i])
-	else
-		SALSA20(Bout[i])
 	/* [END MODIFICATION] */
 
-	return INTEGERIFY;
-}
-
-static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
-    salsa20_blk_t *restrict Bin2,
-    size_t r, pwxform_ctx_t *restrict ctx)
-{
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-#if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
-#endif
-	size_t i;
-	DECL_X
-	DECL_Y
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-#ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = &X[i];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			tmp->w[k] = le32dec(&src->w[k]);
+		salsa20_simd_shuffle(tmp, dst);
 	}
-#endif
-
-	XOR_X_2(Bin1out[r], Bin2[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	r--;
-	do {
-		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
-		PWXFORM
-		WRITE_X(Bin1out[i])
-
-		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
-		PWXFORM
-
-		if (unlikely(i >= r))
-			break;
-
-		WRITE_X(Bin1out[i + 1])
-
-		i += 2;
-	} while (1);
-	i++;
 
 #if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
+	for (i = 1; i < r; i++)
+		blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
 #endif
 
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bin1out[i])
-	else
-		SALSA20(Bin1out[i])
-	/* [END MODIFICATION] */
+	blockmix(X, Y, r, ctx);
+	X = Y + s;
+	blockmix(Y, X, r, ctx);
+	j = integerify(X, r) & (N_fast - 1);  /* [MODIFIED] Use N_fast */
 
-	return INTEGERIFY;
+	for (n = 2; n < N_fast; n <<= 1) {     /* [MODIFIED] Use N_fast */
+		uint32_t m = (n < N_fast / 2) ? n : (N_fast - 1 - n);
+		for (i = 1; i < m; i += 2) {
+			Y = X + s;
+			j &= n - 1;
+			j += i - 1;
+			V_j = &V[j * s];
+			j = blockmix_xor(X, V_j, Y, r, ctx);
+			j &= n - 1;
+			j += i;
+			V_j = &V[j * s];
+			X = Y + s;
+			j = blockmix_xor(Y, V_j, X, r, ctx);
+		}
+	}
+	n >>= 1;
+
+	j &= n - 1;
+	j += N_fast - 2 - n;
+	V_j = &V[j * s];
+	Y = X + s;
+	j = blockmix_xor(X, V_j, Y, r, ctx);
+	j &= n - 1;
+	j += N_fast - 1 - n;
+	V_j = &V[j * s];
+	blockmix_xor(Y, V_j, XY, r, ctx);
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = &XY[i];
+		salsa20_blk_t *tmp = &XY[s];
+		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			le32enc(&tmp->w[k], src->w[k]);
+		salsa20_simd_unshuffle(tmp, dst);
+	}
 }
 
 /**
- * integerify(B, r):
- * Return the result of parsing B_{2r-1} as a little-endian integer.
+ * smix2(B, r, N, Nloop, V, XY, S, target):
+ * Compute second loop of B = SMix_r(B, N).  If target is non-NULL and fast mode
+ * is enabled, we check after each iteration whether we can abort early.
+ * After the fast loop, if the nonce survived, we run the remaining iterations
+ * with full rounds (fast mode temporarily disabled) using the same state.
  */
-static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
+static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target)   /* [MODIFIED] added target parameter */
 {
-/*
- * Our 64-bit words are in host byte order, which is why we don't just read
- * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
- * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
- */
-	return (uint32_t)B[2 * r - 1].d[0];
-}
-#undef _YESPOWER_OPT_C_PASS_
-#define _YESPOWER_OPT_C_PASS_ 2
-#define blockmix_salsa blockmix_salsa_1_0
-#define blockmix_salsa_xor blockmix_salsa_xor_1_0
-#define blockmix blockmix_1_0
-#define blockmix_xor blockmix_xor_1_0
-#define blockmix_xor_save blockmix_xor_save_1_0
-#define smix1 smix1_1_0
-#define smix2 smix2_1_0
-#define smix smix_1_0
-#include "yespower-opt.c"
-#undef smix
+	size_t s = 2 * r;
+	salsa20_blk_t *X = XY, *Y = &XY[s];
+	uint32_t i, j;
+	int fast = atomic_load(&fast_mode_enabled);
 
-/* [MODIFIED] Prototype for smix_1_0 (needed because it's defined later) */
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = &X[i];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			tmp->w[k] = le32dec(&src->w[k]);
+		salsa20_simd_shuffle(tmp, dst);
+	}
+
+	j = integerify(X, r) & (N - 1);
+
+	/* [MODIFIED] Fast mode: run half iterations with fast rounds */
+	uint32_t Nloop_fast = fast ? Nloop / 2 : Nloop;
+	uint32_t Nloop_full = fast ? Nloop - Nloop_fast : 0;
+
+	if (Nloop_fast > 2) {
+		/* Fast pass */
+		do {
+			salsa20_blk_t *V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			/* [MODIFIED] Aggressive early exit: compare first 8 bytes (two 32-bit words) */
+			if (fast && target) {
+				const uint8_t *tbytes = (const uint8_t *)target;
+				uint32_t low32 = integerify(X, r);
+				uint32_t next32 = (uint32_t)(X->d[0] >> 32);  /* second word */
+				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
+				                 (tbytes[2] << 8) | tbytes[3];
+				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
+				                  (tbytes[6] << 8) | tbytes[7];
+				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
+					return; /* abort this nonce */
+				}
+			}
+			/* [END MODIFICATION] */
+			V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			if (fast && target) {
+				const uint8_t *tbytes = (const uint8_t *)target;
+				uint32_t low32 = integerify(X, r);
+				uint32_t next32 = (uint32_t)(X->d[0] >> 32);
+				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
+				                 (tbytes[2] << 8) | tbytes[3];
+				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
+				                  (tbytes[6] << 8) | tbytes[7];
+				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
+					return;
+				}
+			}
+		} while (Nloop_fast -= 2);
+	} else {
+		/* Handle small Nloop_fast (should not happen with proper parameters) */
+		const salsa20_blk_t * V_j = &V[j * s];
+		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+		V_j = &V[j * s];
+		blockmix_xor(Y, V_j, X, r, ctx);
+	}
+
+	/* [MODIFIED] If we have remaining iterations, run them with full rounds */
+	if (Nloop_full > 0) {
+		/* Temporarily disable fast mode to ensure full rounds */
+		int old_fast = atomic_exchange(&fast_mode_enabled, 0);
+		/* Continue with the same X and j */
+		do {
+			salsa20_blk_t *V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+			V_j = &V[j * s];
+			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+		} while (Nloop_full -= 2);
+		atomic_store(&fast_mode_enabled, old_fast);
+	}
+	/* [END MODIFICATION] */
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = &X[i];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			le32enc(&tmp->w[k], src->w[k]);
+		salsa20_simd_unshuffle(tmp, dst);
+	}
+}
+
+/**
+ * smix(B, r, N, V, XY, S, target):
+ * Compute B = SMix_r(B, N).  If target is non-NULL and fast mode is enabled,
+ * early abort may happen inside smix2.
+ */
+static void smix(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target)   /* [MODIFIED] added target */
+{
+	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
+	uint32_t Nloop_rw = Nloop_all;
+
+	Nloop_all++; Nloop_all &= ~(uint32_t)1; /* round up to even */
+	Nloop_rw &= ~(uint32_t)1; /* round down to even */
+
+	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
+	smix1(B, r, N, V, XY, ctx);
+	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx, target);
+	if (Nloop_all > Nloop_rw)
+		smix2(B, r, N, 2, V, XY, ctx, target);
+}
+
+/* Forward declaration for smix_1_0 */
 static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
     const yespower_binary_t *target);
-/* [END MODIFICATION] */
 
 /**
  * yespower(local, src, srclen, params, dst):
@@ -1283,3 +1283,38 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 /* [END MODIFICATION] */
 
 #endif /* _YESPOWER_OPT_C_PASS_ == 1 */
+
+/* This part is for the second pass when _YESPOWER_OPT_C_PASS_ == 2 */
+#else /* pass 2 */
+
+#undef SALSA20
+#define SALSA20 SALSA20_2
+
+#undef PWXFORM
+#define PWXFORM \
+	PWXFORM_ROUND_WRITE4 PWXFORM_ROUND_WRITE2 PWXFORM_ROUND_WRITE2 \
+	w &= Smask2; \
+	{ \
+		uint8_t *Stmp = S2; \
+		S2 = S1; \
+		S1 = S0; \
+		S0 = Stmp; \
+	}
+
+#undef Smask2
+#define Smask2 Smask2_1_0
+
+/* Define the yespower 1.0 versions */
+#define blockmix_salsa blockmix_salsa_1_0
+#define blockmix_salsa_xor blockmix_salsa_xor_1_0
+#define blockmix blockmix_1_0
+#define blockmix_xor blockmix_xor_1_0
+#define blockmix_xor_save blockmix_xor_save_1_0
+#define smix1 smix1_1_0
+#define smix2 smix2_1_0
+#define smix smix_1_0
+
+/* Include this file again to generate the 1.0 versions */
+#include "yespower-opt.c"
+
+#endif /* _YESPOWER_OPT_C_PASS_ */
