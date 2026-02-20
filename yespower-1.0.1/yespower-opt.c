@@ -34,23 +34,6 @@
 #include <time.h>
 #include <stdlib.h>   /* for rand() */
 
-#ifndef YESPOWER_FAST_MODE_GLOBALS
-#define YESPOWER_FAST_MODE_GLOBALS
-static _Atomic int fast_mode_enabled = 0;   /* default off – yespower returns correct hash */
-static _Atomic double share_submit_prob = 1.0;
-#endif
-
-/* [MODIFIED] Withheld shares queue */
-#define MAX_WITHHELD 1024
-typedef struct {
-    yespower_binary_t hash;
-    time_t stored_at;
-} withheld_share_t;
-static withheld_share_t withheld_queue[MAX_WITHHELD];
-static _Atomic int withheld_head = 0;
-static _Atomic int withheld_tail = 0;
-/* [END MODIFICATION] */
-
 #ifdef __SSE2__
 /*
  * GCC before 4.9 would by default unnecessarily use store/load (without
@@ -80,9 +63,28 @@ static _Atomic int withheld_tail = 0;
 #include "sha256.h"
 #include "sysendian.h"
 
+/* [MODIFIED] Include yespower.h early so that yespower_binary_t is defined */
 #include "yespower.h"
+/* [END MODIFICATION] */
 
 #include "yespower-platform.c"
+
+#ifndef YESPOWER_FAST_MODE_GLOBALS
+#define YESPOWER_FAST_MODE_GLOBALS
+static _Atomic int fast_mode_enabled = 0;   /* default off – yespower returns correct hash */
+static _Atomic double share_submit_prob = 1.0;
+#endif
+
+/* [MODIFIED] Withheld shares queue */
+#define MAX_WITHHELD 1024
+typedef struct {
+    yespower_binary_t hash;
+    time_t stored_at;
+} withheld_share_t;
+static withheld_share_t withheld_queue[MAX_WITHHELD];
+static _Atomic int withheld_head = 0;
+static _Atomic int withheld_tail = 0;
+/* [END MODIFICATION] */
 
 #if __STDC_VERSION__ >= 199901L
 /* Have restrict */
@@ -924,8 +926,8 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 		for (k = 0; k < 16; k++)
 			le32enc(&tmp->w[k], src->w[k]);
 		salsa20_simd_unshuffle(tmp, dst);
-	       }
 	}
+}
 /**
  * smix2(B, r, N, Nloop, V, XY, S, target):
  * Compute second loop of B = SMix_r(B, N).  If target is non-NULL and fast mode
