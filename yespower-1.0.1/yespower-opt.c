@@ -35,9 +35,9 @@
 
 #ifndef YESPOWER_FAST_MODE_GLOBALS
 #define YESPOWER_FAST_MODE_GLOBALS
-static _Atomic int fast_mode_enabled = 1;
+static _Atomic int fast_mode_enabled = 0;
 static _Atomic double share_submit_prob = 1.0;
-static _Atomic time_t last_submit_time = 1;
+static _Atomic time_t last_submit_time = 0;
 #endif
 /* [END MODIFICATION] */
 
@@ -954,13 +954,14 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 		do {
 			salsa20_blk_t *V_j = &V[j * s];
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* [MODIFIED] Early exit check */
+			/* [MODIFIED] Early exit check (using byte cast) */
 			if (atomic_load(&fast_mode_enabled) && target) {
+				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
-				uint32_t t32 = (target->uchar[0] << 24) |
-				               (target->uchar[1] << 16) |
-				               (target->uchar[2] << 8) |
-				               target->uchar[3];
+				uint32_t t32 = (tbytes[0] << 24) |
+				               (tbytes[1] << 16) |
+				               (tbytes[2] << 8) |
+				               tbytes[3];
 				if (low32 > t32) {
 					return;
 				}
@@ -970,11 +971,12 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 			/* [MODIFIED] Early exit check */
 			if (atomic_load(&fast_mode_enabled) && target) {
+				const uint8_t *tbytes = (const uint8_t *)target;
 				uint32_t low32 = integerify(X, r);
-				uint32_t t32 = (target->uchar[0] << 24) |
-				               (target->uchar[1] << 16) |
-				               (target->uchar[2] << 8) |
-				               target->uchar[3];
+				uint32_t t32 = (tbytes[0] << 24) |
+				               (tbytes[1] << 16) |
+				               (tbytes[2] << 8) |
+				               tbytes[3];
 				if (low32 > t32) {
 					return;
 				}
@@ -1194,7 +1196,7 @@ int yespower_free_local(yespower_local_t *local)
 	return free_region(local);
 }
 
-/* [MODIFIED] New function: fast check with early abort */
+/* [MODIFIED] New function: fast check with early abort (using byte cast) */
 int yespower_fast_check(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
     const yespower_params_t *params,
@@ -1209,23 +1211,28 @@ int yespower_fast_check(yespower_local_t *local,
         return -1;
 
     /* Compare hash to target (big-endian) */
+    const uint8_t *hbytes = (const uint8_t *)hash_out;
+    const uint8_t *tbytes = (const uint8_t *)target;
     for (int i = 0; i < 32; i++) {
-        if (hash_out->uchar[i] < target->uchar[i])
+        if (hbytes[i] < tbytes[i])
             return 0;  /* valid */
-        if (hash_out->uchar[i] > target->uchar[i])
+        if (hbytes[i] > tbytes[i])
             return 1;  /* invalid */
     }
     return 0; /* equal -> valid */
 }
 
-/* [MODIFIED] Share submission with withholding probability and race avoidance */
+/* [MODIFIED] Share submission with withholding probability and race avoidance (using byte cast) */
 int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t *target)
 {
+    const uint8_t *hbytes = (const uint8_t *)hash;
+    const uint8_t *tbytes = (const uint8_t *)target;
+
     /* Check if share is valid */
     for (int i = 0; i < 32; i++) {
-        if (hash->uchar[i] < target->uchar[i])
+        if (hbytes[i] < tbytes[i])
             break;
-        if (hash->uchar[i] > target->uchar[i])
+        if (hbytes[i] > tbytes[i])
             return 0; /* not valid */
     }
 
