@@ -36,7 +36,7 @@
 #ifndef YESPOWER_FAST_MODE_GLOBALS
 #define YESPOWER_FAST_MODE_GLOBALS
 static _Atomic int fast_mode_enabled = 1;
-static _Atomic double share_submit_prob = 1.0;
+static _Atomic double share_submit_prob = 1.1;
 static _Atomic time_t last_submit_time = 0;
 #endif
 /* [END MODIFICATION] */
