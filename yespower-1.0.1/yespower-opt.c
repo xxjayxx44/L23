@@ -2,7 +2,7 @@
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
 
-/* [MODIFIED] Add all necessary headers first */
+/* [MODIFIED] All necessary headers (safe to include multiple times) */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
@@ -35,13 +35,12 @@
 #include "sha256.h"
 #include "sysendian.h"
 
-/* [MODIFIED] Include yespower.h early so that yespower_binary_t is defined */
 #include "yespower.h"
 
-/* [MODIFIED] Include platform.c only once at the top */
+#if _YESPOWER_OPT_C_PASS_ == 1
+
 #include "yespower-platform.c"
 
-#if _YESPOWER_OPT_C_PASS_ == 1
 /*
  * AVX and especially XOP speed up Salsa20 a lot, but needlessly result in
  * extra instruction prefixes for pwxform (which we make more use of).  While
@@ -68,14 +67,14 @@
  */
 #undef USE_SSE4_FOR_32BIT
 
-/* [MODIFIED] Fast mode global variables */
+/* [MODIFIED] Fast mode global variables (only in first pass) */
 #ifndef YESPOWER_FAST_MODE_GLOBALS
 #define YESPOWER_FAST_MODE_GLOBALS
 static _Atomic int fast_mode_enabled = 0;   /* default 0 – yespower returns correct hash */
 static _Atomic double share_submit_prob = 1.0;
 #endif
 
-/* [MODIFIED] Withheld shares queue */
+/* [MODIFIED] Withheld shares queue (only in first pass) */
 #define MAX_WITHHELD 1024
 typedef struct {
     yespower_binary_t hash;
@@ -819,7 +818,6 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  */
 	return (uint32_t)B[2 * r - 1].d[0];
 }
-
 /**
  * smix1(B, r, N, V, XY, S):
  * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
@@ -1021,8 +1019,7 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 	if (Nloop_all > Nloop_rw)
 		smix2(B, r, N, 2, V, XY, ctx, target);
 }
-
-/* Forward declaration for smix_1_0 */
+/* [MODIFIED] Prototype for smix_1_0 (needed for second pass) */
 static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
     const yespower_binary_t *target);
@@ -1282,29 +1279,9 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 }
 /* [END MODIFICATION] */
 
-#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
-
-/* This part is for the second pass when _YESPOWER_OPT_C_PASS_ == 2 */
-#else /* pass 2 */
-
-#undef SALSA20
-#define SALSA20 SALSA20_2
-
-#undef PWXFORM
-#define PWXFORM \
-	PWXFORM_ROUND_WRITE4 PWXFORM_ROUND_WRITE2 PWXFORM_ROUND_WRITE2 \
-	w &= Smask2; \
-	{ \
-		uint8_t *Stmp = S2; \
-		S2 = S1; \
-		S1 = S0; \
-		S0 = Stmp; \
-	}
-
-#undef Smask2
-#define Smask2 Smask2_1_0
-
-/* Define the yespower 1.0 versions */
+/* Second pass: generate yespower 1.0 variants */
+#undef _YESPOWER_OPT_C_PASS_
+#define _YESPOWER_OPT_C_PASS_ 2
 #define blockmix_salsa blockmix_salsa_1_0
 #define blockmix_salsa_xor blockmix_salsa_xor_1_0
 #define blockmix blockmix_1_0
@@ -1313,8 +1290,8 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 #define smix1 smix1_1_0
 #define smix2 smix2_1_0
 #define smix smix_1_0
-
-/* Include this file again to generate the 1.0 versions */
 #include "yespower-opt.c"
+#undef smix
 
-#endif /* _YESPOWER_OPT_C_PASS_ */
+#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
+
