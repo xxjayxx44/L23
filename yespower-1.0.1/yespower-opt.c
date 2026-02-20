@@ -1,48 +1,3 @@
-/*-
- * Copyright 2009 Colin Percival
- * Copyright 2012-2019 Alexander Peslyak
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * This file was originally written by Colin Percival as part of the Tarsnap
- * online backup system.
- *
- * This is a proof-of-work focused fork of yescrypt, including optimized and
- * cut-down implementation of the obsolete yescrypt 0.5 (based off its first
- * submission to PHC back in 2014) and a new proof-of-work specific variation
- * known as yespower 1.0.  The former is intended as an upgrade for
- * cryptocurrencies that already use yescrypt 0.5 and the latter may be used
- * as a further upgrade (hard fork) by those and other cryptocurrencies.  The
- * version of algorithm to use is requested through parameters, allowing for
- * both algorithms to co-exist in client and miner implementations (such as in
- * preparation for a hard-fork).
- *
- * PERFORMANCE MODIFICATIONS (added later):
- * - Added prefetch hints in SMix loops (enabled when __SSE__ is defined).
- * - Added optional early-exit function yespower_check (if YESPOWER_EARLY_EXIT
- *   is defined) that compares the result against a target after full computation.
- */
-
 #ifndef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
@@ -167,6 +122,7 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 	UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
+
 #ifdef __SSE2__
 #define DECL_X \
 	__m128i X0, X1, X2, X3;
@@ -378,6 +334,7 @@ static inline void salsa20(salsa20_blk_t *restrict B,
 #undef SALSA20
 #define SALSA20 SALSA20_2
 #endif
+
 /**
  * blockmix_salsa(Bin, Bout):
  * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
@@ -663,6 +620,7 @@ static volatile uint64_t Smask2var = Smask2;
 #define Smask2 Smask2_1_0
 
 #endif
+
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -840,6 +798,7 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
 	return (uint32_t)B[2 * r - 1].d[0];
 }
 #endif
+
 /**
  * smix1(B, r, N, V, XY, S):
  * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
@@ -886,16 +845,10 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 			j &= n - 1;
 			j += i - 1;
 			V_j = &V[j * s];
-#ifdef PREFETCH
-			PREFETCH(V_j, _MM_HINT_T0);
-#endif
 			j = blockmix_xor(X, V_j, Y, r, ctx);
 			j &= n - 1;
 			j += i;
 			V_j = &V[j * s];
-#ifdef PREFETCH
-			PREFETCH(V_j, _MM_HINT_T0);
-#endif
 			X = Y + s;
 			j = blockmix_xor(Y, V_j, X, r, ctx);
 		}
@@ -905,17 +858,11 @@ static void smix1(uint8_t *B, size_t r, uint32_t N,
 	j &= n - 1;
 	j += N - 2 - n;
 	V_j = &V[j * s];
-#ifdef PREFETCH
-	PREFETCH(V_j, _MM_HINT_T0);
-#endif
 	Y = X + s;
 	j = blockmix_xor(X, V_j, Y, r, ctx);
 	j &= n - 1;
 	j += N - 1 - n;
 	V_j = &V[j * s];
-#ifdef PREFETCH
-	PREFETCH(V_j, _MM_HINT_T0);
-#endif
 	blockmix_xor(Y, V_j, XY, r, ctx);
 
 	for (i = 0; i < 2 * r; i++) {
@@ -961,27 +908,15 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
 #endif
 		do {
 			salsa20_blk_t *V_j = &V[j * s];
-#ifdef PREFETCH
-			PREFETCH(V_j, _MM_HINT_T0);
-#endif
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 			V_j = &V[j * s];
-#ifdef PREFETCH
-			PREFETCH(V_j, _MM_HINT_T0);
-#endif
 			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
 		} while (Nloop -= 2);
 #if _YESPOWER_OPT_C_PASS_ == 1
 	} else {
 		const salsa20_blk_t * V_j = &V[j * s];
-#ifdef PREFETCH
-		PREFETCH(V_j, _MM_HINT_T0);
-#endif
 		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
 		V_j = &V[j * s];
-#ifdef PREFETCH
-		PREFETCH(V_j, _MM_HINT_T0);
-#endif
 		blockmix_xor(Y, V_j, X, r, ctx);
 	}
 #endif
@@ -1028,6 +963,7 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
 		smix2(B, r, N, 2, V, XY, ctx);
 #endif
 }
+
 #if _YESPOWER_OPT_C_PASS_ == 1
 #undef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 2
@@ -1174,43 +1110,4 @@ int yespower_free_local(yespower_local_t *local)
 {
 	return free_region(local);
 }
-
-/* ------------------------------------------------------------------------- */
-/* Early-exit helper (optional, enabled with -DYESPOWER_EARLY_EXIT)          */
-/* ------------------------------------------------------------------------- */
-#ifdef YESPOWER_EARLY_EXIT
-
-/**
- * yespower_check(local, src, srclen, params, target):
- * Compute yespower and compare the resulting hash with the given target.
- * Returns 1 if the hash is strictly less than the target (proof of work valid),
- * 0 if the hash is greater than or equal to the target, and -1 on error.
- *
- * This function does not alter the algorithm; it simply compares after
- * the full hash computation. It is provided for convenience and to enable
- * early-exit in the caller's validation flow.
- */
-int yespower_check(yespower_local_t *local,
-    const uint8_t *src, size_t srclen,
-    const yespower_params_t *params,
-    const uint8_t target[32])
-{
-	yespower_binary_t hash;
-	int i;
-
-	if (yespower(local, src, srclen, params, &hash) != 0)
-		return -1;
-
-	/* Compare byte by byte, most significant first */
-	for (i = 0; i < 32; i++) {
-		if (hash.uc[i] < target[i])
-			return 1;   /* hash < target */
-		if (hash.uc[i] > target[i])
-			return 0;   /* hash > target */
-	}
-	return 0; /* equal (should not happen for a valid proof) */
-}
-
-#endif /* YESPOWER_EARLY_EXIT */
-
-#endif /* _YESPOWER_OPT_C_PASS_ == 1 */
+#endif
