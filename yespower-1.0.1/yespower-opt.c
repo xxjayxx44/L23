@@ -2,7 +2,7 @@
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
 
-/* [MODIFIED] All necessary headers (safe to include multiple times) */
+/* [MODIFIED] All necessary headers */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
@@ -1279,9 +1279,12 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 }
 /* [END MODIFICATION] */
 
-/* Second pass: generate yespower 1.0 variants */
-#undef _YESPOWER_OPT_C_PASS_
-#define _YESPOWER_OPT_C_PASS_ 2
+/* ========== Second pass: yespower 1.0 variants ========== */
+#else /* _YESPOWER_OPT_C_PASS_ == 2 */
+/*
+ * Re-define these to generate the yespower 1.0 variants.
+ * This is exactly as in the original file.
+ */
 #define blockmix_salsa blockmix_salsa_1_0
 #define blockmix_salsa_xor blockmix_salsa_xor_1_0
 #define blockmix blockmix_1_0
@@ -1294,4 +1297,6 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 #undef smix
 
 #endif /* _YESPOWER_OPT_C_PASS_ == 1 */
-
+/* The second pass inclusion above will re-enter this file with _YESPOWER_OPT_C_PASS_ == 2,
+   which triggers the #else branch and defines the _1_0 functions.  Those functions are
+   used in the yespower 1.0 branch of yespower(). */
