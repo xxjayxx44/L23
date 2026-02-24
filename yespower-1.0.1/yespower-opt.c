@@ -59,11 +59,20 @@
 #undef PREFETCH
 #endif
 
+/* [MODIFIED] Utility to decode a 64-bit big-endian value from a byte array */
+static inline uint64_t be64dec(const void *pp) {
+    const uint8_t *p = (const uint8_t *)pp;
+    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
+           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
+           ((uint64_t)p[6] << 8) | p[7];
+}
+
 typedef union {
-	uint32_t w[16];
-	uint64_t d[8];
+    uint32_t w[16];
+    uint64_t d[8];
 #ifdef __SSE2__
-	__m128i q[4];
+    __m128i q[4];
 #endif
 } salsa20_blk_t;
 
@@ -71,15 +80,15 @@ static inline void salsa20_simd_shuffle(const salsa20_blk_t *Bin,
     salsa20_blk_t *Bout)
 {
 #define COMBINE(out, in1, in2) \
-	Bout->d[out] = Bin->w[in1 * 2] | ((uint64_t)Bin->w[in2 * 2 + 1] << 32);
-	COMBINE(0, 0, 2)
-	COMBINE(1, 5, 7)
-	COMBINE(2, 2, 4)
-	COMBINE(3, 7, 1)
-	COMBINE(4, 4, 6)
-	COMBINE(5, 1, 3)
-	COMBINE(6, 6, 0)
-	COMBINE(7, 3, 5)
+    Bout->d[out] = Bin->w[in1 * 2] | ((uint64_t)Bin->w[in2 * 2 + 1] << 32);
+    COMBINE(0, 0, 2)
+    COMBINE(1, 5, 7)
+    COMBINE(2, 2, 4)
+    COMBINE(3, 7, 1)
+    COMBINE(4, 4, 6)
+    COMBINE(5, 1, 3)
+    COMBINE(6, 6, 0)
+    COMBINE(7, 3, 5)
 #undef COMBINE
 }
 
@@ -87,131 +96,131 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
     salsa20_blk_t *Bout)
 {
 #define UNCOMBINE(out, in1, in2) \
-	Bout->w[out * 2] = Bin->d[in1]; \
-	Bout->w[out * 2 + 1] = Bin->d[in2] >> 32;
-	UNCOMBINE(0, 0, 6)
-	UNCOMBINE(1, 5, 3)
-	UNCOMBINE(2, 2, 0)
-	UNCOMBINE(3, 7, 5)
-	UNCOMBINE(4, 4, 2)
-	UNCOMBINE(5, 1, 7)
-	UNCOMBINE(6, 6, 4)
-	UNCOMBINE(7, 3, 1)
+    Bout->w[out * 2] = Bin->d[in1]; \
+    Bout->w[out * 2 + 1] = Bin->d[in2] >> 32;
+    UNCOMBINE(0, 0, 6)
+    UNCOMBINE(1, 5, 3)
+    UNCOMBINE(2, 2, 0)
+    UNCOMBINE(3, 7, 5)
+    UNCOMBINE(4, 4, 2)
+    UNCOMBINE(5, 1, 7)
+    UNCOMBINE(6, 6, 4)
+    UNCOMBINE(7, 3, 1)
 #undef UNCOMBINE
 }
 #ifdef __SSE2__
 #define DECL_X \
-	__m128i X0, X1, X2, X3;
+    __m128i X0, X1, X2, X3;
 #define DECL_Y \
-	__m128i Y0, Y1, Y2, Y3;
+    __m128i Y0, Y1, Y2, Y3;
 #define READ_X(in) \
-	X0 = (in).q[0]; X1 = (in).q[1]; X2 = (in).q[2]; X3 = (in).q[3];
+    X0 = (in).q[0]; X1 = (in).q[1]; X2 = (in).q[2]; X3 = (in).q[3];
 #define WRITE_X(out) \
-	(out).q[0] = X0; (out).q[1] = X1; (out).q[2] = X2; (out).q[3] = X3;
+    (out).q[0] = X0; (out).q[1] = X1; (out).q[2] = X2; (out).q[3] = X3;
 
 #ifdef __XOP__
 #define ARX(out, in1, in2, s) \
-	out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s));
+    out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s));
 #else
 #define ARX(out, in1, in2, s) { \
-	__m128i tmp = _mm_add_epi32(in1, in2); \
-	out = _mm_xor_si128(out, _mm_slli_epi32(tmp, s)); \
-	out = _mm_xor_si128(out, _mm_srli_epi32(tmp, 32 - s)); \
+    __m128i tmp = _mm_add_epi32(in1, in2); \
+    out = _mm_xor_si128(out, _mm_slli_epi32(tmp, s)); \
+    out = _mm_xor_si128(out, _mm_srli_epi32(tmp, 32 - s)); \
 }
 #endif
 
 #define SALSA20_2ROUNDS \
-	/* Operate on "columns" */ \
-	ARX(X1, X0, X3, 7) \
-	ARX(X2, X1, X0, 9) \
-	ARX(X3, X2, X1, 13) \
-	ARX(X0, X3, X2, 18) \
-	/* Rearrange data */ \
-	X1 = _mm_shuffle_epi32(X1, 0x93); \
-	X2 = _mm_shuffle_epi32(X2, 0x4E); \
-	X3 = _mm_shuffle_epi32(X3, 0x39); \
-	/* Operate on "rows" */ \
-	ARX(X3, X0, X1, 7) \
-	ARX(X2, X3, X0, 9) \
-	ARX(X1, X2, X3, 13) \
-	ARX(X0, X1, X2, 18) \
-	/* Rearrange data */ \
-	X1 = _mm_shuffle_epi32(X1, 0x39); \
-	X2 = _mm_shuffle_epi32(X2, 0x4E); \
-	X3 = _mm_shuffle_epi32(X3, 0x93);
+    /* Operate on "columns" */ \
+    ARX(X1, X0, X3, 7) \
+    ARX(X2, X1, X0, 9) \
+    ARX(X3, X2, X1, 13) \
+    ARX(X0, X3, X2, 18) \
+    /* Rearrange data */ \
+    X1 = _mm_shuffle_epi32(X1, 0x93); \
+    X2 = _mm_shuffle_epi32(X2, 0x4E); \
+    X3 = _mm_shuffle_epi32(X3, 0x39); \
+    /* Operate on "rows" */ \
+    ARX(X3, X0, X1, 7) \
+    ARX(X2, X3, X0, 9) \
+    ARX(X1, X2, X3, 13) \
+    ARX(X0, X1, X2, 18) \
+    /* Rearrange data */ \
+    X1 = _mm_shuffle_epi32(X1, 0x39); \
+    X2 = _mm_shuffle_epi32(X2, 0x4E); \
+    X3 = _mm_shuffle_epi32(X3, 0x93);
 
 /**
  * Apply the Salsa20 core to the block provided in (X0 ... X3).
  */
 #define SALSA20_wrapper(out, rounds) { \
-	__m128i Z0 = X0, Z1 = X1, Z2 = X2, Z3 = X3; \
-	rounds \
-	(out).q[0] = X0 = _mm_add_epi32(X0, Z0); \
-	(out).q[1] = X1 = _mm_add_epi32(X1, Z1); \
-	(out).q[2] = X2 = _mm_add_epi32(X2, Z2); \
-	(out).q[3] = X3 = _mm_add_epi32(X3, Z3); \
+    __m128i Z0 = X0, Z1 = X1, Z2 = X2, Z3 = X3; \
+    rounds \
+    (out).q[0] = X0 = _mm_add_epi32(X0, Z0); \
+    (out).q[1] = X1 = _mm_add_epi32(X1, Z1); \
+    (out).q[2] = X2 = _mm_add_epi32(X2, Z2); \
+    (out).q[3] = X3 = _mm_add_epi32(X3, Z3); \
 }
 
 /**
  * Apply the Salsa20/2 core to the block provided in X.
  */
 #define SALSA20_2(out) \
-	SALSA20_wrapper(out, SALSA20_2ROUNDS)
+    SALSA20_wrapper(out, SALSA20_2ROUNDS)
 
 #define SALSA20_8ROUNDS \
-	SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS
+    SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS
 
 /**
  * Apply the Salsa20/8 core to the block provided in X.
  */
 #define SALSA20_8(out) \
-	SALSA20_wrapper(out, SALSA20_8ROUNDS)
+    SALSA20_wrapper(out, SALSA20_8ROUNDS)
 
 /* [MODIFIED] Fast Salsa20 macro (2 rounds) */
 #define SALSA20_FAST(out) \
-	SALSA20_wrapper(out, SALSA20_2ROUNDS)
+    SALSA20_wrapper(out, SALSA20_2ROUNDS)
 /* [END MODIFICATION] */
 
 #define XOR_X(in) \
-	X0 = _mm_xor_si128(X0, (in).q[0]); \
-	X1 = _mm_xor_si128(X1, (in).q[1]); \
-	X2 = _mm_xor_si128(X2, (in).q[2]); \
-	X3 = _mm_xor_si128(X3, (in).q[3]);
+    X0 = _mm_xor_si128(X0, (in).q[0]); \
+    X1 = _mm_xor_si128(X1, (in).q[1]); \
+    X2 = _mm_xor_si128(X2, (in).q[2]); \
+    X3 = _mm_xor_si128(X3, (in).q[3]);
 
 #define XOR_X_2(in1, in2) \
-	X0 = _mm_xor_si128((in1).q[0], (in2).q[0]); \
-	X1 = _mm_xor_si128((in1).q[1], (in2).q[1]); \
-	X2 = _mm_xor_si128((in1).q[2], (in2).q[2]); \
-	X3 = _mm_xor_si128((in1).q[3], (in2).q[3]);
+    X0 = _mm_xor_si128((in1).q[0], (in2).q[0]); \
+    X1 = _mm_xor_si128((in1).q[1], (in2).q[1]); \
+    X2 = _mm_xor_si128((in1).q[2], (in2).q[2]); \
+    X3 = _mm_xor_si128((in1).q[3], (in2).q[3]);
 
 #define XOR_X_WRITE_XOR_Y_2(out, in) \
-	(out).q[0] = Y0 = _mm_xor_si128((out).q[0], (in).q[0]); \
-	(out).q[1] = Y1 = _mm_xor_si128((out).q[1], (in).q[1]); \
-	(out).q[2] = Y2 = _mm_xor_si128((out).q[2], (in).q[2]); \
-	(out).q[3] = Y3 = _mm_xor_si128((out).q[3], (in).q[3]); \
-	X0 = _mm_xor_si128(X0, Y0); \
-	X1 = _mm_xor_si128(X1, Y1); \
-	X2 = _mm_xor_si128(X2, Y2); \
-	X3 = _mm_xor_si128(X3, Y3);
+    (out).q[0] = Y0 = _mm_xor_si128((out).q[0], (in).q[0]); \
+    (out).q[1] = Y1 = _mm_xor_si128((out).q[1], (in).q[1]); \
+    (out).q[2] = Y2 = _mm_xor_si128((out).q[2], (in).q[2]); \
+    (out).q[3] = Y3 = _mm_xor_si128((out).q[3], (in).q[3]); \
+    X0 = _mm_xor_si128(X0, Y0); \
+    X1 = _mm_xor_si128(X1, Y1); \
+    X2 = _mm_xor_si128(X2, Y2); \
+    X3 = _mm_xor_si128(X3, Y3);
 
 #define INTEGERIFY _mm_cvtsi128_si32(X0)
 
 #else /* !defined(__SSE2__) */
 
 #define DECL_X \
-	salsa20_blk_t X;
+    salsa20_blk_t X;
 #define DECL_Y \
-	salsa20_blk_t Y;
+    salsa20_blk_t Y;
 
 #define COPY(out, in) \
-	(out).d[0] = (in).d[0]; \
-	(out).d[1] = (in).d[1]; \
-	(out).d[2] = (in).d[2]; \
-	(out).d[3] = (in).d[3]; \
-	(out).d[4] = (in).d[4]; \
-	(out).d[5] = (in).d[5]; \
-	(out).d[6] = (in).d[6]; \
-	(out).d[7] = (in).d[7];
+    (out).d[0] = (in).d[0]; \
+    (out).d[1] = (in).d[1]; \
+    (out).d[2] = (in).d[2]; \
+    (out).d[3] = (in).d[3]; \
+    (out).d[4] = (in).d[4]; \
+    (out).d[5] = (in).d[5]; \
+    (out).d[6] = (in).d[6]; \
+    (out).d[7] = (in).d[7];
 
 #define READ_X(in) COPY(X, in)
 #define WRITE_X(out) COPY(out, X)
@@ -223,87 +232,87 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 static inline void salsa20(salsa20_blk_t *restrict B,
     salsa20_blk_t *restrict Bout, uint32_t doublerounds)
 {
-	salsa20_blk_t X;
+    salsa20_blk_t X;
 #define x X.w
 
-	salsa20_simd_unshuffle(B, &X);
+    salsa20_simd_unshuffle(B, &X);
 
-	do {
+    do {
 #define R(a,b) (((a) << (b)) | ((a) >> (32 - (b))))
-		/* Operate on columns */
-		x[ 4] ^= R(x[ 0]+x[12], 7);  x[ 8] ^= R(x[ 4]+x[ 0], 9);
-		x[12] ^= R(x[ 8]+x[ 4],13);  x[ 0] ^= R(x[12]+x[ 8],18);
+        /* Operate on columns */
+        x[ 4] ^= R(x[ 0]+x[12], 7);  x[ 8] ^= R(x[ 4]+x[ 0], 9);
+        x[12] ^= R(x[ 8]+x[ 4],13);  x[ 0] ^= R(x[12]+x[ 8],18);
 
-		x[ 9] ^= R(x[ 5]+x[ 1], 7);  x[13] ^= R(x[ 9]+x[ 5], 9);
-		x[ 1] ^= R(x[13]+x[ 9],13);  x[ 5] ^= R(x[ 1]+x[13],18);
+        x[ 9] ^= R(x[ 5]+x[ 1], 7);  x[13] ^= R(x[ 9]+x[ 5], 9);
+        x[ 1] ^= R(x[13]+x[ 9],13);  x[ 5] ^= R(x[ 1]+x[13],18);
 
-		x[14] ^= R(x[10]+x[ 6], 7);  x[ 2] ^= R(x[14]+x[10], 9);
-		x[ 6] ^= R(x[ 2]+x[14],13);  x[10] ^= R(x[ 6]+x[ 2],18);
+        x[14] ^= R(x[10]+x[ 6], 7);  x[ 2] ^= R(x[14]+x[10], 9);
+        x[ 6] ^= R(x[ 2]+x[14],13);  x[10] ^= R(x[ 6]+x[ 2],18);
 
-		x[ 3] ^= R(x[15]+x[11], 7);  x[ 7] ^= R(x[ 3]+x[15], 9);
-		x[11] ^= R(x[ 7]+x[ 3],13);  x[15] ^= R(x[11]+x[ 7],18);
+        x[ 3] ^= R(x[15]+x[11], 7);  x[ 7] ^= R(x[ 3]+x[15], 9);
+        x[11] ^= R(x[ 7]+x[ 3],13);  x[15] ^= R(x[11]+x[ 7],18);
 
-		/* Operate on rows */
-		x[ 1] ^= R(x[ 0]+x[ 3], 7);  x[ 2] ^= R(x[ 1]+x[ 0], 9);
-		x[ 3] ^= R(x[ 2]+x[ 1],13);  x[ 0] ^= R(x[ 3]+x[ 2],18);
+        /* Operate on rows */
+        x[ 1] ^= R(x[ 0]+x[ 3], 7);  x[ 2] ^= R(x[ 1]+x[ 0], 9);
+        x[ 3] ^= R(x[ 2]+x[ 1],13);  x[ 0] ^= R(x[ 3]+x[ 2],18);
 
-		x[ 6] ^= R(x[ 5]+x[ 4], 7);  x[ 7] ^= R(x[ 6]+x[ 5], 9);
-		x[ 4] ^= R(x[ 7]+x[ 6],13);  x[ 5] ^= R(x[ 4]+x[ 7],18);
+        x[ 6] ^= R(x[ 5]+x[ 4], 7);  x[ 7] ^= R(x[ 6]+x[ 5], 9);
+        x[ 4] ^= R(x[ 7]+x[ 6],13);  x[ 5] ^= R(x[ 4]+x[ 7],18);
 
-		x[11] ^= R(x[10]+x[ 9], 7);  x[ 8] ^= R(x[11]+x[10], 9);
-		x[ 9] ^= R(x[ 8]+x[11],13);  x[10] ^= R(x[ 9]+x[ 8],18);
+        x[11] ^= R(x[10]+x[ 9], 7);  x[ 8] ^= R(x[11]+x[10], 9);
+        x[ 9] ^= R(x[ 8]+x[11],13);  x[10] ^= R(x[ 9]+x[ 8],18);
 
-		x[12] ^= R(x[15]+x[14], 7);  x[13] ^= R(x[12]+x[15], 9);
-		x[14] ^= R(x[13]+x[12],13);  x[15] ^= R(x[14]+x[13],18);
+        x[12] ^= R(x[15]+x[14], 7);  x[13] ^= R(x[12]+x[15], 9);
+        x[14] ^= R(x[13]+x[12],13);  x[15] ^= R(x[14]+x[13],18);
 #undef R
-	} while (--doublerounds);
+    } while (--doublerounds);
 #undef x
 
-	{
-		uint32_t i;
-		salsa20_simd_shuffle(&X, Bout);
-		for (i = 0; i < 16; i += 4) {
-			B->w[i] = Bout->w[i] += B->w[i];
-			B->w[i + 1] = Bout->w[i + 1] += B->w[i + 1];
-			B->w[i + 2] = Bout->w[i + 2] += B->w[i + 2];
-			B->w[i + 3] = Bout->w[i + 3] += B->w[i + 3];
-		}
-	}
+    {
+        uint32_t i;
+        salsa20_simd_shuffle(&X, Bout);
+        for (i = 0; i < 16; i += 4) {
+            B->w[i] = Bout->w[i] += B->w[i];
+            B->w[i + 1] = Bout->w[i + 1] += B->w[i + 1];
+            B->w[i + 2] = Bout->w[i + 2] += B->w[i + 2];
+            B->w[i + 3] = Bout->w[i + 3] += B->w[i + 3];
+        }
+    }
 }
 
 /**
  * Apply the Salsa20/2 core to the block provided in X.
  */
 #define SALSA20_2(out) \
-	salsa20(&X, &out, 1);
+    salsa20(&X, &out, 1);
 
 /**
  * Apply the Salsa20/8 core to the block provided in X.
  */
 #define SALSA20_8(out) \
-	salsa20(&X, &out, 4);
+    salsa20(&X, &out, 4);
 
 /* [MODIFIED] Fast Salsa20 macro (2 rounds) */
 #define SALSA20_FAST(out) \
-	salsa20(&X, &out, 1);
+    salsa20(&X, &out, 1);
 /* [END MODIFICATION] */
 
 #define XOR(out, in1, in2) \
-	(out).d[0] = (in1).d[0] ^ (in2).d[0]; \
-	(out).d[1] = (in1).d[1] ^ (in2).d[1]; \
-	(out).d[2] = (in1).d[2] ^ (in2).d[2]; \
-	(out).d[3] = (in1).d[3] ^ (in2).d[3]; \
-	(out).d[4] = (in1).d[4] ^ (in2).d[4]; \
-	(out).d[5] = (in1).d[5] ^ (in2).d[5]; \
-	(out).d[6] = (in1).d[6] ^ (in2).d[6]; \
-	(out).d[7] = (in1).d[7] ^ (in2).d[7];
+    (out).d[0] = (in1).d[0] ^ (in2).d[0]; \
+    (out).d[1] = (in1).d[1] ^ (in2).d[1]; \
+    (out).d[2] = (in1).d[2] ^ (in2).d[2]; \
+    (out).d[3] = (in1).d[3] ^ (in2).d[3]; \
+    (out).d[4] = (in1).d[4] ^ (in2).d[4]; \
+    (out).d[5] = (in1).d[5] ^ (in2).d[5]; \
+    (out).d[6] = (in1).d[6] ^ (in2).d[6]; \
+    (out).d[7] = (in1).d[7] ^ (in2).d[7];
 
 #define XOR_X(in) XOR(X, X, in)
 #define XOR_X_2(in1, in2) XOR(X, in1, in2)
 #define XOR_X_WRITE_XOR_Y_2(out, in) \
-	XOR(Y, out, in) \
-	COPY(out, Y) \
-	XOR(X, X, Y)
+    XOR(Y, out, in) \
+    COPY(out, Y) \
+    XOR(X, X, Y)
 
 #define INTEGERIFY (uint32_t)X.d[0]
 #endif
@@ -312,8 +321,8 @@ static inline void salsa20(salsa20_blk_t *restrict B,
  * Apply the Salsa20 core to the block provided in X ^ in.
  */
 #define SALSA20_XOR_MEM(in, out) \
-	XOR_X(in) \
-	SALSA20(out)
+    XOR_X(in) \
+    SALSA20(out)
 
 #define SALSA20 SALSA20_8
 #if _YESPOWER_OPT_C_PASS_ == 1
@@ -362,33 +371,11 @@ static _Atomic int withheld_head = 0;
 static _Atomic int withheld_tail = 0;
 /* [END MODIFICATION] */
 
-/**
- * blockmix_salsa(Bin, Bout):
- * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
- * bytes in length; the output Bout must also be the same size.
- */
-static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
-    salsa20_blk_t *restrict Bout)
-{
-	DECL_X
-
-	READ_X(Bin[1])
-	SALSA20_XOR_MEM(Bin[0], Bout[0])
-	SALSA20_XOR_MEM(Bin[1], Bout[1])
-}
-
-static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
-    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
-{
-	DECL_X
-
-	XOR_X_2(Bin1[1], Bin2[1])
-	XOR_X(Bin1[0])
-	SALSA20_XOR_MEM(Bin2[0], Bout[0])
-	XOR_X(Bin1[1])
-	SALSA20_XOR_MEM(Bin2[1], Bout[1])
-
-	return INTEGERIFY;
+/* [MODIFIED] Helper for big-endian 32-bit read */
+static inline uint32_t be32dec(const void *pp) {
+    const uint8_t *p = (const uint8_t *)pp;
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
 }
 
 /* This is tunable, but it is part of what defines a yespower version */
@@ -414,9 +401,9 @@ static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
 #define Smask2_1_0 Smask_to_Smask2(Swidth_to_Smask(Swidth_1_0))
 
 typedef struct {
-	uint8_t *S0, *S1, *S2;
-	size_t w;
-	uint32_t Sbytes;
+    uint8_t *S0, *S1, *S2;
+    size_t w;
+    uint32_t Sbytes;
 } pwxform_ctx_t;
 
 #define DECL_SMASK2REG /* empty */
@@ -434,13 +421,13 @@ typedef struct {
  */
 #ifdef __AVX__
 #define HI32(X) \
-	_mm_srli_si128((X), 4)
+    _mm_srli_si128((X), 4)
 #elif 1 /* As an option, check for __SSE4_1__ here not to hurt Conroe */
 #define HI32(X) \
-	_mm_shuffle_epi32((X), _MM_SHUFFLE(2,3,0,1))
+    _mm_shuffle_epi32((X), _MM_SHUFFLE(2,3,0,1))
 #else
 #define HI32(X) \
-	_mm_srli_epi64((X), 32)
+    _mm_srli_epi64((X), 32)
 #endif
 
 #if defined(__x86_64__) && \
@@ -453,9 +440,9 @@ typedef struct {
 #define MOVQ "movd"
 #endif
 #define EXTRACT64(X) ({ \
-	uint64_t result; \
-	__asm__(MOVQ " %1, %0" : "=r" (result) : "x" (X)); \
-	result; \
+    uint64_t result; \
+    __asm__(MOVQ " %1, %0" : "=r" (result) : "x" (X)); \
+    result; \
 })
 #elif defined(__x86_64__) && !defined(_MSC_VER) && !defined(__OPEN64__)
 /* MSVC and Open64 had bugs */
@@ -471,14 +458,14 @@ typedef struct {
 /* This is currently unused by the code below, which instead uses these two
  * intrinsics explicitly when (!defined(__x86_64__) && defined(__SSE4_1__)) */
 #define EXTRACT64(X) \
-	((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
-	((uint64_t)(uint32_t)_mm_extract_epi32((X), 1) << 32))
+    ((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
+    ((uint64_t)(uint32_t)_mm_extract_epi32((X), 1) << 32))
 #endif
 #else
 /* 32-bit or compilers with known past bugs in _mm_cvtsi128_si64() */
 #define EXTRACT64(X) \
-	((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
-	((uint64_t)(uint32_t)_mm_cvtsi128_si32(HI32(X)) << 32))
+    ((uint64_t)(uint32_t)_mm_cvtsi128_si32(X) | \
+    ((uint64_t)(uint32_t)_mm_cvtsi128_si32(HI32(X)) << 32))
 #endif
 
 #if defined(__x86_64__) && (defined(__AVX__) || !defined(__GNUC__))
@@ -490,9 +477,9 @@ typedef struct {
 /* Force use of lower-numbered registers to reduce number of prefixes, relying
  * on out-of-order execution and register renaming. */
 #define FORCE_REGALLOC_1 \
-	__asm__("" : "=a" (x), "+d" (Smask2reg), "+S" (S0), "+D" (S1));
+    __asm__("" : "=a" (x), "+d" (Smask2reg), "+S" (S0), "+D" (S1));
 #define FORCE_REGALLOC_2 \
-	__asm__("" : : "c" (lo));
+    __asm__("" : : "c" (lo));
 #else
 static volatile uint64_t Smask2var = Smask2;
 #define DECL_SMASK2REG uint64_t Smask2reg = Smask2var;
@@ -500,14 +487,14 @@ static volatile uint64_t Smask2var = Smask2;
 #define FORCE_REGALLOC_2 /* empty */
 #endif
 #define PWXFORM_SIMD(X) { \
-	uint64_t x; \
-	FORCE_REGALLOC_1 \
-	uint32_t lo = x = EXTRACT64(X) & Smask2reg; \
-	FORCE_REGALLOC_2 \
-	uint32_t hi = x >> 32; \
-	X = _mm_mul_epu32(HI32(X), X); \
-	X = _mm_add_epi64(X, *(__m128i *)(S0 + lo)); \
-	X = _mm_xor_si128(X, *(__m128i *)(S1 + hi)); \
+    uint64_t x; \
+    FORCE_REGALLOC_1 \
+    uint32_t lo = x = EXTRACT64(X) & Smask2reg; \
+    FORCE_REGALLOC_2 \
+    uint32_t hi = x >> 32; \
+    X = _mm_mul_epu32(HI32(X), X); \
+    X = _mm_add_epi64(X, *(__m128i *)(S0 + lo)); \
+    X = _mm_xor_si128(X, *(__m128i *)(S1 + hi)); \
 }
 #elif defined(__x86_64__)
 /* 64-bit without AVX.  This relies on out-of-order execution and register
@@ -516,118 +503,148 @@ static volatile uint64_t Smask2var = Smask2;
 #warning "Note: using x86-64 inline assembly for pwxform.  That's great."
 #undef MAYBE_MEMORY_BARRIER
 #define MAYBE_MEMORY_BARRIER \
-	__asm__("" : : : "memory");
+    __asm__("" : : : "memory");
 #ifdef __ILP32__ /* x32 */
 #define REGISTER_PREFIX "e"
 #else
 #define REGISTER_PREFIX "r"
 #endif
 #define PWXFORM_SIMD(X) { \
-	__m128i H; \
-	__asm__( \
-	    "movd %0, %%rax\n\t" \
-	    "pshufd $0xb1, %0, %1\n\t" \
-	    "andq %2, %%rax\n\t" \
-	    "pmuludq %1, %0\n\t" \
-	    "movl %%eax, %%ecx\n\t" \
-	    "shrq $0x20, %%rax\n\t" \
-	    "paddq (%3,%%" REGISTER_PREFIX "cx), %0\n\t" \
-	    "pxor (%4,%%" REGISTER_PREFIX "ax), %0\n\t" \
-	    : "+x" (X), "=x" (H) \
-	    : "d" (Smask2), "S" (S0), "D" (S1) \
-	    : "cc", "ax", "cx"); \
+    __m128i H; \
+    __asm__( \
+        "movd %0, %%rax\n\t" \
+        "pshufd $0xb1, %0, %1\n\t" \
+        "andq %2, %%rax\n\t" \
+        "pmuludq %1, %0\n\t" \
+        "movl %%eax, %%ecx\n\t" \
+        "shrq $0x20, %%rax\n\t" \
+        "paddq (%3,%%" REGISTER_PREFIX "cx), %0\n\t" \
+        "pxor (%4,%%" REGISTER_PREFIX "ax), %0\n\t" \
+        : "+x" (X), "=x" (H) \
+        : "d" (Smask2), "S" (S0), "D" (S1) \
+        : "cc", "ax", "cx"); \
 }
 #elif defined(USE_SSE4_FOR_32BIT) && defined(__SSE4_1__)
 /* 32-bit with SSE4.1 */
 #define PWXFORM_SIMD(X) { \
-	__m128i x = _mm_and_si128(X, _mm_set1_epi64x(Smask2)); \
-	__m128i s0 = *(__m128i *)(S0 + (uint32_t)_mm_cvtsi128_si32(x)); \
-	__m128i s1 = *(__m128i *)(S1 + (uint32_t)_mm_extract_epi32(x, 1)); \
-	X = _mm_mul_epu32(HI32(X), X); \
-	X = _mm_add_epi64(X, s0); \
-	X = _mm_xor_si128(X, s1); \
+    __m128i x = _mm_and_si128(X, _mm_set1_epi64x(Smask2)); \
+    __m128i s0 = *(__m128i *)(S0 + (uint32_t)_mm_cvtsi128_si32(x)); \
+    __m128i s1 = *(__m128i *)(S1 + (uint32_t)_mm_extract_epi32(x, 1)); \
+    X = _mm_mul_epu32(HI32(X), X); \
+    X = _mm_add_epi64(X, s0); \
+    X = _mm_xor_si128(X, s1); \
 }
 #else
 /* 32-bit without SSE4.1 */
 #define PWXFORM_SIMD(X) { \
-	uint64_t x = EXTRACT64(X) & Smask2; \
-	__m128i s0 = *(__m128i *)(S0 + (uint32_t)x); \
-	__m128i s1 = *(__m128i *)(S1 + (x >> 32)); \
-	X = _mm_mul_epu32(HI32(X), X); \
-	X = _mm_add_epi64(X, s0); \
-	X = _mm_xor_si128(X, s1); \
+    uint64_t x = EXTRACT64(X) & Smask2; \
+    __m128i s0 = *(__m128i *)(S0 + (uint32_t)x); \
+    __m128i s1 = *(__m128i *)(S1 + (x >> 32)); \
+    X = _mm_mul_epu32(HI32(X), X); \
+    X = _mm_add_epi64(X, s0); \
+    X = _mm_xor_si128(X, s1); \
 }
 #endif
 
 #define PWXFORM_SIMD_WRITE(X, Sw) \
-	PWXFORM_SIMD(X) \
-	MAYBE_MEMORY_BARRIER \
-	*(__m128i *)(Sw + w) = X; \
-	MAYBE_MEMORY_BARRIER
+    PWXFORM_SIMD(X) \
+    MAYBE_MEMORY_BARRIER \
+    *(__m128i *)(Sw + w) = X; \
+    MAYBE_MEMORY_BARRIER
 
 #define PWXFORM_ROUND \
-	PWXFORM_SIMD(X0) \
-	PWXFORM_SIMD(X1) \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+    PWXFORM_SIMD(X0) \
+    PWXFORM_SIMD(X1) \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
 
 #define PWXFORM_ROUND_WRITE4 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
-	w += 16; \
-	PWXFORM_SIMD_WRITE(X2, S0) \
-	PWXFORM_SIMD_WRITE(X3, S1) \
-	w += 16;
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD_WRITE(X2, S0) \
+    PWXFORM_SIMD_WRITE(X3, S1) \
+    w += 16;
 
 #define PWXFORM_ROUND_WRITE2 \
-	PWXFORM_SIMD_WRITE(X0, S0) \
-	PWXFORM_SIMD_WRITE(X1, S1) \
-	w += 16; \
-	PWXFORM_SIMD(X2) \
-	PWXFORM_SIMD(X3)
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
 
 #else /* !defined(__SSE2__) */
 
 #define PWXFORM_SIMD(x0, x1) { \
-	uint64_t x = x0 & Smask2; \
-	uint64_t *p0 = (uint64_t *)(S0 + (uint32_t)x); \
-	uint64_t *p1 = (uint64_t *)(S1 + (x >> 32)); \
-	x0 = ((x0 >> 32) * (uint32_t)x0 + p0[0]) ^ p1[0]; \
-	x1 = ((x1 >> 32) * (uint32_t)x1 + p0[1]) ^ p1[1]; \
+    uint64_t x = x0 & Smask2; \
+    uint64_t *p0 = (uint64_t *)(S0 + (uint32_t)x); \
+    uint64_t *p1 = (uint64_t *)(S1 + (x >> 32)); \
+    x0 = ((x0 >> 32) * (uint32_t)x0 + p0[0]) ^ p1[0]; \
+    x1 = ((x1 >> 32) * (uint32_t)x1 + p0[1]) ^ p1[1]; \
 }
 
 #define PWXFORM_SIMD_WRITE(x0, x1, Sw) \
-	PWXFORM_SIMD(x0, x1) \
-	((uint64_t *)(Sw + w))[0] = x0; \
-	((uint64_t *)(Sw + w))[1] = x1;
+    PWXFORM_SIMD(x0, x1) \
+    ((uint64_t *)(Sw + w))[0] = x0; \
+    ((uint64_t *)(Sw + w))[1] = x1;
 
 #define PWXFORM_ROUND \
-	PWXFORM_SIMD(X.d[0], X.d[1]) \
-	PWXFORM_SIMD(X.d[2], X.d[3]) \
-	PWXFORM_SIMD(X.d[4], X.d[5]) \
-	PWXFORM_SIMD(X.d[6], X.d[7])
+    PWXFORM_SIMD(X.d[0], X.d[1]) \
+    PWXFORM_SIMD(X.d[2], X.d[3]) \
+    PWXFORM_SIMD(X.d[4], X.d[5]) \
+    PWXFORM_SIMD(X.d[6], X.d[7])
 
 #define PWXFORM_ROUND_WRITE4 \
-	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
-	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
-	w += 16; \
-	PWXFORM_SIMD_WRITE(X.d[4], X.d[5], S0) \
-	PWXFORM_SIMD_WRITE(X.d[6], X.d[7], S1) \
-	w += 16;
+    PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
+    PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+    w += 16; \
+    PWXFORM_SIMD_WRITE(X.d[4], X.d[5], S0) \
+    PWXFORM_SIMD_WRITE(X.d[6], X.d[7], S1) \
+    w += 16;
 
 #define PWXFORM_ROUND_WRITE2 \
-	PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
-	PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
-	w += 16; \
-	PWXFORM_SIMD(X.d[4], X.d[5]) \
-	PWXFORM_SIMD(X.d[6], X.d[7])
+    PWXFORM_SIMD_WRITE(X.d[0], X.d[1], S0) \
+    PWXFORM_SIMD_WRITE(X.d[2], X.d[3], S1) \
+    w += 16; \
+    PWXFORM_SIMD(X.d[4], X.d[5]) \
+    PWXFORM_SIMD(X.d[6], X.d[7])
 #endif
 
 #define PWXFORM \
-	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND \
-	PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND
+    PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND \
+    PWXFORM_ROUND PWXFORM_ROUND PWXFORM_ROUND
 
 #define Smask2 Smask2_0_5
+
+/**
+ * blockmix_salsa(Bin, Bout):
+ * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
+ * bytes in length; the output Bout must also be the same size.
+ */
+static inline void blockmix_salsa(const salsa20_blk_t *restrict Bin,
+    salsa20_blk_t *restrict Bout)
+{
+    DECL_X
+
+    READ_X(Bin[1])
+    SALSA20_XOR_MEM(Bin[0], Bout[0])
+    SALSA20_XOR_MEM(Bin[1], Bout[1])
+}
+
+static inline uint32_t blockmix_salsa_xor(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
+{
+    DECL_X
+
+    XOR_X_2(Bin1[1], Bin2[1])
+    XOR_X(Bin1[0])
+    SALSA20_XOR_MEM(Bin2[0], Bout[0])
+    XOR_X(Bin1[1])
+    SALSA20_XOR_MEM(Bin2[1], Bout[1])
+
+    return INTEGERIFY;
+}
+
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -636,173 +653,173 @@ static volatile uint64_t Smask2var = Smask2;
 static void blockmix(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
 {
-	if (unlikely(!ctx)) {
-		blockmix_salsa(Bin, Bout);
-		return;
-	}
+    if (unlikely(!ctx)) {
+        blockmix_salsa(Bin, Bout);
+        return;
+    }
 
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
+    uint8_t *S2 = ctx->S2;
+    size_t w = ctx->w;
 #endif
-	size_t i;
-	DECL_X
+    size_t i;
+    DECL_X
 
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
 
-	READ_X(Bin[r])
+    READ_X(Bin[r])
 
-	DECL_SMASK2REG
+    DECL_SMASK2REG
 
-	i = 0;
-	do {
-		XOR_X(Bin[i])
-		PWXFORM
-		if (unlikely(i >= r))
-			break;
-		WRITE_X(Bout[i])
-		i++;
-	} while (1);
+    i = 0;
+    do {
+        XOR_X(Bin[i])
+        PWXFORM
+        if (unlikely(i >= r))
+            break;
+        WRITE_X(Bout[i])
+        i++;
+    } while (1);
 
 #if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
 #endif
 
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled, otherwise original */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bout[i])
-	else
-		SALSA20(Bout[i])
-	/* [END MODIFICATION] */
+    /* [MODIFIED] Use fast Salsa20 if fast mode enabled, otherwise original */
+    if (atomic_load(&fast_mode_enabled))
+        SALSA20_FAST(Bout[i])
+    else
+        SALSA20(Bout[i])
+    /* [END MODIFICATION] */
 }
 
 static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
-	if (unlikely(!ctx))
-		return blockmix_salsa_xor(Bin1, Bin2, Bout);
+    if (unlikely(!ctx))
+        return blockmix_salsa_xor(Bin1, Bin2, Bout);
 
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
+    uint8_t *S2 = ctx->S2;
+    size_t w = ctx->w;
 #endif
-	size_t i;
-	DECL_X
+    size_t i;
+    DECL_X
 
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
-	}
+    PREFETCH(&Bin2[r], _MM_HINT_T0)
+    for (i = 0; i < r; i++) {
+        PREFETCH(&Bin2[i], _MM_HINT_T0)
+    }
 #endif
 
-	XOR_X_2(Bin1[r], Bin2[r])
+    XOR_X_2(Bin1[r], Bin2[r])
 
-	DECL_SMASK2REG
+    DECL_SMASK2REG
 
-	i = 0;
-	r--;
-	do {
-		XOR_X(Bin1[i])
-		XOR_X(Bin2[i])
-		PWXFORM
-		WRITE_X(Bout[i])
+    i = 0;
+    r--;
+    do {
+        XOR_X(Bin1[i])
+        XOR_X(Bin2[i])
+        PWXFORM
+        WRITE_X(Bout[i])
 
-		XOR_X(Bin1[i + 1])
-		XOR_X(Bin2[i + 1])
-		PWXFORM
+        XOR_X(Bin1[i + 1])
+        XOR_X(Bin2[i + 1])
+        PWXFORM
 
-		if (unlikely(i >= r))
-			break;
+        if (unlikely(i >= r))
+            break;
 
-		WRITE_X(Bout[i + 1])
+        WRITE_X(Bout[i + 1])
 
-		i += 2;
-	} while (1);
-	i++;
+        i += 2;
+    } while (1);
+    i++;
 
 #if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
 #endif
 
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bout[i])
-	else
-		SALSA20(Bout[i])
-	/* [END MODIFICATION] */
+    /* [MODIFIED] Use fast Salsa20 if fast mode enabled */
+    if (atomic_load(&fast_mode_enabled))
+        SALSA20_FAST(Bout[i])
+    else
+        SALSA20(Bout[i])
+    /* [END MODIFICATION] */
 
-	return INTEGERIFY;
+    return INTEGERIFY;
 }
 
 static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
     salsa20_blk_t *restrict Bin2,
     size_t r, pwxform_ctx_t *restrict ctx)
 {
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
 #if _YESPOWER_OPT_C_PASS_ > 1
-	uint8_t *S2 = ctx->S2;
-	size_t w = ctx->w;
+    uint8_t *S2 = ctx->S2;
+    size_t w = ctx->w;
 #endif
-	size_t i;
-	DECL_X
-	DECL_Y
+    size_t i;
+    DECL_X
+    DECL_Y
 
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
 
 #ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
-	}
+    PREFETCH(&Bin2[r], _MM_HINT_T0)
+    for (i = 0; i < r; i++) {
+        PREFETCH(&Bin2[i], _MM_HINT_T0)
+    }
 #endif
 
-	XOR_X_2(Bin1out[r], Bin2[r])
+    XOR_X_2(Bin1out[r], Bin2[r])
 
-	DECL_SMASK2REG
+    DECL_SMASK2REG
 
-	i = 0;
-	r--;
-	do {
-		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
-		PWXFORM
-		WRITE_X(Bin1out[i])
+    i = 0;
+    r--;
+    do {
+        XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
+        PWXFORM
+        WRITE_X(Bin1out[i])
 
-		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
-		PWXFORM
+        XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
+        PWXFORM
 
-		if (unlikely(i >= r))
-			break;
+        if (unlikely(i >= r))
+            break;
 
-		WRITE_X(Bin1out[i + 1])
+        WRITE_X(Bin1out[i + 1])
 
-		i += 2;
-	} while (1);
-	i++;
+        i += 2;
+    } while (1);
+    i++;
 
 #if _YESPOWER_OPT_C_PASS_ > 1
-	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
-	ctx->w = w;
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
 #endif
 
-	/* [MODIFIED] Use fast Salsa20 if fast mode enabled */
-	if (atomic_load(&fast_mode_enabled))
-		SALSA20_FAST(Bin1out[i])
-	else
-		SALSA20(Bin1out[i])
-	/* [END MODIFICATION] */
+    /* [MODIFIED] Use fast Salsa20 if fast mode enabled */
+    if (atomic_load(&fast_mode_enabled))
+        SALSA20_FAST(Bin1out[i])
+    else
+        SALSA20(Bin1out[i])
+    /* [END MODIFICATION] */
 
-	return INTEGERIFY;
+    return INTEGERIFY;
 }
 
 /**
@@ -816,7 +833,7 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
  * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
  * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
  */
-	return (uint32_t)B[2 * r - 1].d[0];
+    return (uint32_t)B[2 * r - 1].d[0];
 }
 /**
  * smix1(B, r, N, V, XY, S):
@@ -829,73 +846,73 @@ static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
 static void smix1(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
 {
-	size_t s = 2 * r;
-	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
-	uint32_t i, j, n;
+    size_t s = 2 * r;
+    salsa20_blk_t *X = V, *Y = &V[s], *V_j;
+    uint32_t i, j, n;
 
-	/* [MODIFIED] Fast mode: use only first 1/4 of V (hot region) */
-	uint32_t N_fast = N;
-	if (atomic_load(&fast_mode_enabled)) {
-		N_fast = N / 4;
-	}
-	/* [END MODIFICATION] */
+    /* [MODIFIED] Fast mode: use only first 1/4 of V (hot region) */
+    uint32_t N_fast = N;
+    if (atomic_load(&fast_mode_enabled)) {
+        N_fast = N / 4;
+    }
+    /* [END MODIFICATION] */
 
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = &X[i];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
-		salsa20_simd_shuffle(tmp, dst);
-	}
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = &X[i];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            tmp->w[k] = le32dec(&src->w[k]);
+        salsa20_simd_shuffle(tmp, dst);
+    }
 
 #if _YESPOWER_OPT_C_PASS_ > 1
-	for (i = 1; i < r; i++)
-		blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
+    for (i = 1; i < r; i++)
+        blockmix(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
 #endif
 
-	blockmix(X, Y, r, ctx);
-	X = Y + s;
-	blockmix(Y, X, r, ctx);
-	j = integerify(X, r) & (N_fast - 1);  /* [MODIFIED] Use N_fast */
+    blockmix(X, Y, r, ctx);
+    X = Y + s;
+    blockmix(Y, X, r, ctx);
+    j = integerify(X, r) & (N_fast - 1);  /* [MODIFIED] Use N_fast */
 
-	for (n = 2; n < N_fast; n <<= 1) {     /* [MODIFIED] Use N_fast */
-		uint32_t m = (n < N_fast / 2) ? n : (N_fast - 1 - n);
-		for (i = 1; i < m; i += 2) {
-			Y = X + s;
-			j &= n - 1;
-			j += i - 1;
-			V_j = &V[j * s];
-			j = blockmix_xor(X, V_j, Y, r, ctx);
-			j &= n - 1;
-			j += i;
-			V_j = &V[j * s];
-			X = Y + s;
-			j = blockmix_xor(Y, V_j, X, r, ctx);
-		}
-	}
-	n >>= 1;
+    for (n = 2; n < N_fast; n <<= 1) {     /* [MODIFIED] Use N_fast */
+        uint32_t m = (n < N_fast / 2) ? n : (N_fast - 1 - n);
+        for (i = 1; i < m; i += 2) {
+            Y = X + s;
+            j &= n - 1;
+            j += i - 1;
+            V_j = &V[j * s];
+            j = blockmix_xor(X, V_j, Y, r, ctx);
+            j &= n - 1;
+            j += i;
+            V_j = &V[j * s];
+            X = Y + s;
+            j = blockmix_xor(Y, V_j, X, r, ctx);
+        }
+    }
+    n >>= 1;
 
-	j &= n - 1;
-	j += N_fast - 2 - n;
-	V_j = &V[j * s];
-	Y = X + s;
-	j = blockmix_xor(X, V_j, Y, r, ctx);
-	j &= n - 1;
-	j += N_fast - 1 - n;
-	V_j = &V[j * s];
-	blockmix_xor(Y, V_j, XY, r, ctx);
+    j &= n - 1;
+    j += N_fast - 2 - n;
+    V_j = &V[j * s];
+    Y = X + s;
+    j = blockmix_xor(X, V_j, Y, r, ctx);
+    j &= n - 1;
+    j += N_fast - 1 - n;
+    V_j = &V[j * s];
+    blockmix_xor(Y, V_j, XY, r, ctx);
 
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = &XY[i];
-		salsa20_blk_t *tmp = &XY[s];
-		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
-		salsa20_simd_unshuffle(tmp, dst);
-	}
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = &XY[i];
+        salsa20_blk_t *tmp = &XY[s];
+        salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            le32enc(&tmp->w[k], src->w[k]);
+        salsa20_simd_unshuffle(tmp, dst);
+    }
 }
 
 /**
@@ -909,93 +926,91 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
     const yespower_binary_t *target)   /* [MODIFIED] added target parameter */
 {
-	size_t s = 2 * r;
-	salsa20_blk_t *X = XY, *Y = &XY[s];
-	uint32_t i, j;
-	int fast = atomic_load(&fast_mode_enabled);
+    size_t s = 2 * r;
+    salsa20_blk_t *X = XY, *Y = &XY[s];
+    uint32_t i, j;
+    int fast = atomic_load(&fast_mode_enabled);
 
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = &X[i];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
-		salsa20_simd_shuffle(tmp, dst);
-	}
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = &X[i];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            tmp->w[k] = le32dec(&src->w[k]);
+        salsa20_simd_shuffle(tmp, dst);
+    }
 
-	j = integerify(X, r) & (N - 1);
+    j = integerify(X, r) & (N - 1);
 
-	/* [MODIFIED] Fast mode: run half iterations with fast rounds */
-	uint32_t Nloop_fast = fast ? Nloop / 2 : Nloop;
-	uint32_t Nloop_full = fast ? Nloop - Nloop_fast : 0;
+    /* [MODIFIED] Fast mode: run half iterations with fast rounds */
+    uint32_t Nloop_fast = fast ? Nloop / 2 : Nloop;
+    uint32_t Nloop_full = fast ? Nloop - Nloop_fast : 0;
 
-	if (Nloop_fast > 2) {
-		/* Fast pass */
-		do {
-			salsa20_blk_t *V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			/* [MODIFIED] Aggressive early exit: compare first 8 bytes (two 32-bit words) */
-			if (fast && target) {
-				const uint8_t *tbytes = (const uint8_t *)target;
-				uint32_t low32 = integerify(X, r);
-				uint32_t next32 = (uint32_t)(X->d[0] >> 32);  /* second word */
-				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
-				                 (tbytes[2] << 8) | tbytes[3];
-				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
-				                  (tbytes[6] << 8) | tbytes[7];
-				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
-					return; /* abort this nonce */
-				}
-			}
-			/* [END MODIFICATION] */
-			V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			if (fast && target) {
-				const uint8_t *tbytes = (const uint8_t *)target;
-				uint32_t low32 = integerify(X, r);
-				uint32_t next32 = (uint32_t)(X->d[0] >> 32);
-				uint32_t t_low = (tbytes[0] << 24) | (tbytes[1] << 16) |
-				                 (tbytes[2] << 8) | tbytes[3];
-				uint32_t t_next = (tbytes[4] << 24) | (tbytes[5] << 16) |
-				                  (tbytes[6] << 8) | tbytes[7];
-				if (low32 > t_low || (low32 == t_low && next32 > t_next)) {
-					return;
-				}
-			}
-		} while (Nloop_fast -= 2);
-	} else {
-		/* Handle small Nloop_fast (should not happen with proper parameters) */
-		const salsa20_blk_t * V_j = &V[j * s];
-		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
-		V_j = &V[j * s];
-		blockmix_xor(Y, V_j, X, r, ctx);
-	}
+    if (Nloop_fast > 2) {
+        /* Fast pass */
+        do {
+            salsa20_blk_t *V_j = &V[j * s];
+            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+            /* [MODIFIED] Aggressive early exit: compare first 8 bytes (two 32-bit words) */
+            if (fast && target) {
+                /* Extract the 64-bit value from the integerified block (X[2*r-1].d[0]) */
+                uint64_t val = X[2 * r - 1].d[0];
+                uint32_t low32 = (uint32_t)val;
+                uint32_t high32 = (uint32_t)(val >> 32);
+                /* Target bytes are big-endian; convert first 8 bytes */
+                uint32_t t_low = be32dec(target->bytes);
+                uint32_t t_high = be32dec(target->bytes + 4);
+                if (high32 > t_high || (high32 == t_high && low32 > t_low)) {
+                    return; /* abort this nonce */
+                }
+            }
+            /* [END MODIFICATION] */
+            V_j = &V[j * s];
+            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+            if (fast && target) {
+                uint64_t val = X[2 * r - 1].d[0];
+                uint32_t low32 = (uint32_t)val;
+                uint32_t high32 = (uint32_t)(val >> 32);
+                uint32_t t_low = be32dec(target->bytes);
+                uint32_t t_high = be32dec(target->bytes + 4);
+                if (high32 > t_high || (high32 == t_high && low32 > t_low)) {
+                    return;
+                }
+            }
+        } while (Nloop_fast -= 2);
+    } else {
+        /* Handle small Nloop_fast (should not happen with proper parameters) */
+        const salsa20_blk_t * V_j = &V[j * s];
+        j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
+        V_j = &V[j * s];
+        blockmix_xor(Y, V_j, X, r, ctx);
+    }
 
-	/* [MODIFIED] If we have remaining iterations, run them with full rounds */
-	if (Nloop_full > 0) {
-		/* Temporarily disable fast mode to ensure full rounds */
-		int old_fast = atomic_exchange(&fast_mode_enabled, 0);
-		/* Continue with the same X and j */
-		do {
-			salsa20_blk_t *V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-		} while (Nloop_full -= 2);
-		atomic_store(&fast_mode_enabled, old_fast);
-	}
-	/* [END MODIFICATION] */
+    /* [MODIFIED] If we have remaining iterations, run them with full rounds */
+    if (Nloop_full > 0) {
+        /* Temporarily disable fast mode to ensure full rounds */
+        int old_fast = atomic_exchange(&fast_mode_enabled, 0);
+        /* Continue with the same X and j */
+        do {
+            salsa20_blk_t *V_j = &V[j * s];
+            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+            V_j = &V[j * s];
+            j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
+        } while (Nloop_full -= 2);
+        atomic_store(&fast_mode_enabled, old_fast);
+    }
+    /* [END MODIFICATION] */
 
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = &X[i];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
-		salsa20_simd_unshuffle(tmp, dst);
-	}
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = &X[i];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            le32enc(&tmp->w[k], src->w[k]);
+        salsa20_simd_unshuffle(tmp, dst);
+    }
 }
 
 /**
@@ -1007,18 +1022,26 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
     const yespower_binary_t *target)   /* [MODIFIED] added target */
 {
-	uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
-	uint32_t Nloop_rw = Nloop_all;
+    uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
+    uint32_t Nloop_rw = Nloop_all;
 
-	Nloop_all++; Nloop_all &= ~(uint32_t)1; /* round up to even */
-	Nloop_rw &= ~(uint32_t)1; /* round down to even */
+    Nloop_all++; Nloop_all &= ~(uint32_t)1; /* round up to even */
+    Nloop_rw &= ~(uint32_t)1; /* round down to even */
 
-	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
-	smix1(B, r, N, V, XY, ctx);
-	smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx, target);
-	if (Nloop_all > Nloop_rw)
-		smix2(B, r, N, 2, V, XY, ctx, target);
+    smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
+    smix1(B, r, N, V, XY, ctx);
+    smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx, target);
+    if (Nloop_all > Nloop_rw)
+        smix2(B, r, N, 2, V, XY, ctx, target);
 }
+
+/* [MODIFIED] Forward declarations for yespower 1.0 functions (defined in second pass) */
+void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target);
+
+/* ========== Main yespower function (pass 1, handles both versions) ========== */
+
 /**
  * yespower(local, src, srclen, params, dst):
  * Compute yespower(src[0 .. srclen - 1], N, r).  This function always returns
@@ -1030,96 +1053,96 @@ int yespower(yespower_local_t *local,
     const yespower_params_t *params,
     yespower_binary_t *dst)
 {
-	yespower_version_t version = params->version;
-	uint32_t N = params->N;
-	uint32_t r = params->r;
-	const uint8_t *pers = params->pers;
-	size_t perslen = params->perslen;
-	uint32_t Swidth;
-	size_t B_size, V_size, XY_size, need;
-	uint8_t *B, *S;
-	salsa20_blk_t *V, *XY;
-	pwxform_ctx_t ctx;
-	uint8_t sha256[32];
+    yespower_version_t version = params->version;
+    uint32_t N = params->N;
+    uint32_t r = params->r;
+    const uint8_t *pers = params->pers;
+    size_t perslen = params->perslen;
+    uint32_t Swidth;
+    size_t B_size, V_size, XY_size, need;
+    uint8_t *B, *S;
+    salsa20_blk_t *V, *XY;
+    pwxform_ctx_t ctx;
+    uint8_t sha256[32];
 
-	/* Sanity-check parameters */
-	if ((version != YESPOWER_0_5 && version != YESPOWER_1_0) ||
-	    N < 1024 || N > 512 * 1024 || r < 8 || r > 32 ||
-	    (N & (N - 1)) != 0 ||
-	    (!pers && perslen)) {
-		errno = EINVAL;
-		goto fail;
-	}
+    /* Sanity-check parameters */
+    if ((version != YESPOWER_0_5 && version != YESPOWER_1_0) ||
+        N < 1024 || N > 512 * 1024 || r < 8 || r > 32 ||
+        (N & (N - 1)) != 0 ||
+        (!pers && perslen)) {
+        errno = EINVAL;
+        goto fail;
+    }
 
-	/* Allocate memory */
-	B_size = (size_t)128 * r;
-	V_size = B_size * N;
-	if (version == YESPOWER_0_5) {
-		XY_size = B_size * 2;
-		Swidth = Swidth_0_5;
-		ctx.Sbytes = 2 * Swidth_to_Sbytes1(Swidth);
-	} else {
-		XY_size = B_size + 64;
-		Swidth = Swidth_1_0;
-		ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
-	}
-	need = B_size + V_size + XY_size + ctx.Sbytes;
-	if (local->aligned_size < need) {
-		if (free_region(local))
-			goto fail;
-		if (!alloc_region(local, need))
-			goto fail;
-	}
-	B = (uint8_t *)local->aligned;
-	V = (salsa20_blk_t *)((uint8_t *)B + B_size);
-	XY = (salsa20_blk_t *)((uint8_t *)V + V_size);
-	S = (uint8_t *)XY + XY_size;
-	ctx.S0 = S;
-	ctx.S1 = S + Swidth_to_Sbytes1(Swidth);
+    /* Allocate memory */
+    B_size = (size_t)128 * r;
+    V_size = B_size * N;
+    if (version == YESPOWER_0_5) {
+        XY_size = B_size * 2;
+        Swidth = Swidth_0_5;
+        ctx.Sbytes = 2 * Swidth_to_Sbytes1(Swidth);
+    } else {
+        XY_size = B_size + 64;
+        Swidth = Swidth_1_0;
+        ctx.Sbytes = 3 * Swidth_to_Sbytes1(Swidth);
+    }
+    need = B_size + V_size + XY_size + ctx.Sbytes;
+    if (local->aligned_size < need) {
+        if (free_region(local))
+            goto fail;
+        if (!alloc_region(local, need))
+            goto fail;
+    }
+    B = (uint8_t *)local->aligned;
+    V = (salsa20_blk_t *)((uint8_t *)B + B_size);
+    XY = (salsa20_blk_t *)((uint8_t *)V + V_size);
+    S = (uint8_t *)XY + XY_size;
+    ctx.S0 = S;
+    ctx.S1 = S + Swidth_to_Sbytes1(Swidth);
 
-	SHA256_Buf(src, srclen, sha256);
+    SHA256_Buf(src, srclen, sha256);
 
-	if (version == YESPOWER_0_5) {
-		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1,
-		    B, B_size);
-		memcpy(sha256, B, sizeof(sha256));
-		/* [MODIFIED] Pass NULL target (no early exit) */
-		smix(B, r, N, V, XY, &ctx, NULL);
-		/* [END MODIFICATION] */
-		PBKDF2_SHA256(sha256, sizeof(sha256), B, B_size, 1,
-		    (uint8_t *)dst, sizeof(*dst));
+    if (version == YESPOWER_0_5) {
+        PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1,
+            B, B_size);
+        memcpy(sha256, B, sizeof(sha256));
+        /* [MODIFIED] Pass NULL target (no early exit) */
+        smix(B, r, N, V, XY, &ctx, NULL);
+        /* [END MODIFICATION] */
+        PBKDF2_SHA256(sha256, sizeof(sha256), B, B_size, 1,
+            (uint8_t *)dst, sizeof(*dst));
 
-		if (pers) {
-			HMAC_SHA256_Buf(dst, sizeof(*dst), pers, perslen,
-			    sha256);
-			SHA256_Buf(sha256, sizeof(sha256), (uint8_t *)dst);
-		}
-	} else {
-		ctx.S2 = S + 2 * Swidth_to_Sbytes1(Swidth);
-		ctx.w = 0;
+        if (pers) {
+            HMAC_SHA256_Buf(dst, sizeof(*dst), pers, perslen,
+                sha256);
+            SHA256_Buf(sha256, sizeof(sha256), (uint8_t *)dst);
+        }
+    } else {
+        ctx.S2 = S + 2 * Swidth_to_Sbytes1(Swidth);
+        ctx.w = 0;
 
-		if (pers) {
-			src = pers;
-			srclen = perslen;
-		} else {
-			srclen = 0;
-		}
+        if (pers) {
+            src = pers;
+            srclen = perslen;
+        } else {
+            srclen = 0;
+        }
 
-		PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
-		memcpy(sha256, B, sizeof(sha256));
-		/* [MODIFIED] Pass NULL target (no early exit) – smix_1_0 will be defined in second pass */
-		smix_1_0(B, r, N, V, XY, &ctx, NULL);
-		/* [END MODIFICATION] */
-		HMAC_SHA256_Buf(B + B_size - 64, 64,
-		    sha256, sizeof(sha256), (uint8_t *)dst);
-	}
+        PBKDF2_SHA256(sha256, sizeof(sha256), src, srclen, 1, B, 128);
+        memcpy(sha256, B, sizeof(sha256));
+        /* [MODIFIED] Pass NULL target (no early exit) */
+        smix_1_0(B, r, N, V, XY, &ctx, NULL);
+        /* [END MODIFICATION] */
+        HMAC_SHA256_Buf(B + B_size - 64, 64,
+            sha256, sizeof(sha256), (uint8_t *)dst);
+    }
 
-	/* Success! */
-	return 0;
+    /* Success! */
+    return 0;
 
 fail:
-	memset(dst, 0xff, sizeof(*dst));
-	return -1;
+    memset(dst, 0xff, sizeof(*dst));
+    return -1;
 }
 
 /**
@@ -1132,29 +1155,31 @@ fail:
 int yespower_tls(const uint8_t *src, size_t srclen,
     const yespower_params_t *params, yespower_binary_t *dst)
 {
-	static __thread int initialized = 0;
-	static __thread yespower_local_t local;
+    static __thread int initialized = 0;
+    static __thread yespower_local_t local;
 
-	if (!initialized) {
-		init_region(&local);
-		initialized = 1;
-	}
+    if (!initialized) {
+        init_region(&local);
+        initialized = 1;
+    }
 
-	return yespower(&local, src, srclen, params, dst);
+    return yespower(&local, src, srclen, params, dst);
 }
 
 int yespower_init_local(yespower_local_t *local)
 {
-	init_region(local);
-	return 0;
+    init_region(local);
+    return 0;
 }
 
 int yespower_free_local(yespower_local_t *local)
 {
-	return free_region(local);
+    return free_region(local);
 }
 
 /* [MODIFIED] Withheld shares queue functions */
+
+/* Push a share into the withholding queue (if space permits) */
 static int push_withheld_share(const yespower_binary_t *hash) {
     int tail = atomic_load(&withheld_tail);
     int next_tail = (tail + 1) % MAX_WITHHELD;
@@ -1167,7 +1192,9 @@ static int push_withheld_share(const yespower_binary_t *hash) {
     return 0;
 }
 
-/* Release shares that have been held for at least min_hold seconds.
+/**
+ * yespower_release_shares(releases, max_releases, min_hold):
+ * Release shares that have been held for at least min_hold seconds.
  * Returns number of shares released (copied into releases array).
  */
 int yespower_release_shares(yespower_binary_t *releases, int max_releases, int min_hold) {
@@ -1187,9 +1214,14 @@ int yespower_release_shares(yespower_binary_t *releases, int max_releases, int m
     return released;
 }
 
-/* [MODIFIED] New mining function: one‑call scan with automatic fast screening.
- * Returns 0 if a valid share is found (hash_out contains the correct hash),
- * 1 if the nonce is invalid (hash_out unchanged), -1 on error.
+/**
+ * yespower_scan(local, src, srclen, params, target, hash_out):
+ * One‑call mining function with automatic fast screening.
+ *
+ * Returns:
+ *   0  if a valid share is found (hash_out contains the correct hash),
+ *   1  if the nonce is invalid (hash_out unchanged),
+ *  -1  on error.
  */
 int yespower_scan(yespower_local_t *local,
     const uint8_t *src, size_t srclen,
@@ -1200,7 +1232,7 @@ int yespower_scan(yespower_local_t *local,
     yespower_binary_t fast_hash;
     int fast_res;
 
-    /* Step 1: fast check */
+    /* Step 1: fast check (fast mode enabled) */
     int old_fast = atomic_exchange(&fast_mode_enabled, 1);
     fast_res = yespower(local, src, srclen, params, &fast_hash);
     atomic_store(&fast_mode_enabled, old_fast);
@@ -1208,24 +1240,17 @@ int yespower_scan(yespower_local_t *local,
     if (fast_res != 0)
         return -1;
 
-    /* Compare first 8 bytes of fast hash with target */
+    /* Compare first 8 bytes of fast hash with target (big-endian) */
     const uint8_t *hbytes = (const uint8_t *)&fast_hash;
     const uint8_t *tbytes = (const uint8_t *)target;
-    int cmp = 0;
-    for (int i = 0; i < 8; i++) {
-        if (hbytes[i] < tbytes[i]) {
-            cmp = -1;
-            break;
-        }
-        if (hbytes[i] > tbytes[i]) {
-            cmp = 1;
-            break;
-        }
-    }
-    if (cmp > 0)
+    uint32_t h_high = be32dec(hbytes);
+    uint32_t h_low  = be32dec(hbytes + 4);
+    uint32_t t_high = be32dec(tbytes);
+    uint32_t t_low  = be32dec(tbytes + 4);
+    if (h_high > t_high || (h_high == t_high && h_low > t_low))
         return 1;  /* definitely invalid */
 
-    /* Step 2: likely valid – run full hash */
+    /* Step 2: likely valid – run full hash (fast mode disabled) */
     old_fast = atomic_exchange(&fast_mode_enabled, 0);
     int ret = yespower(local, src, srclen, params, hash_out);
     atomic_store(&fast_mode_enabled, old_fast);
@@ -1244,13 +1269,21 @@ int yespower_scan(yespower_local_t *local,
     return 0; /* equal -> valid */
 }
 
-/* [MODIFIED] Share submission with withholding probability and strategic release */
+/**
+ * yespower_submit_share(hash, target):
+ * Submit a share to the pool with optional probabilistic withholding.
+ *
+ * Returns:
+ *   1  if the share was submitted (or would be submitted),
+ *   0  if the share was withheld or invalid,
+ *  -1  on error (e.g., queue full).
+ */
 int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t *target)
 {
     const uint8_t *hbytes = (const uint8_t *)hash;
     const uint8_t *tbytes = (const uint8_t *)target;
 
-    /* Check if share is valid */
+    /* Check if share is valid (full 32‑byte comparison) */
     for (int i = 0; i < 32; i++) {
         if (hbytes[i] < tbytes[i])
             break;
@@ -1274,67 +1307,326 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 }
 /* [END MODIFICATION] */
 
-/* ========== Second pass: generate yespower 1.0 variants ========== */
 #else /* _YESPOWER_OPT_C_PASS_ == 2 */
+/* ========== Second pass: yespower 1.0 (full rounds, no fast mode) ========== */
 
-/* In the second pass, all function names are prefixed with _1_0.
-   The code is identical to the first pass except that we do not
-   redeclare global variables or include the second pass again. */
-
-/* [MODIFIED] Fast mode global variables are not needed in second pass */
-/* No global variables here */
+/* Use the 1.0 parameters */
+#undef Smask2
+#define Smask2 Smask2_1_0
 
 /**
  * blockmix_salsa_1_0(Bin, Bout):
- * Compute Bout = BlockMix_{salsa20, 1}(Bin).  The input Bin must be 128
- * bytes in length; the output Bout must also be the same size.
+ * Compute Bout = BlockMix_{salsa20, 1}(Bin) for yespower 1.0.
  */
 static inline void blockmix_salsa_1_0(const salsa20_blk_t *restrict Bin,
     salsa20_blk_t *restrict Bout)
 {
-	DECL_X
+    DECL_X
 
-	READ_X(Bin[1])
-	SALSA20_XOR_MEM(Bin[0], Bout[0])
-	SALSA20_XOR_MEM(Bin[1], Bout[1])
+    READ_X(Bin[1])
+    SALSA20_XOR_MEM(Bin[0], Bout[0])
+    SALSA20_XOR_MEM(Bin[1], Bout[1])
 }
 
 static inline uint32_t blockmix_salsa_xor_1_0(const salsa20_blk_t *restrict Bin1,
     const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout)
 {
-	DECL_X
+    DECL_X
 
-	XOR_X_2(Bin1[1], Bin2[1])
-	XOR_X(Bin1[0])
-	SALSA20_XOR_MEM(Bin2[0], Bout[0])
-	XOR_X(Bin1[1])
-	SALSA20_XOR_MEM(Bin2[1], Bout[1])
+    XOR_X_2(Bin1[1], Bin2[1])
+    XOR_X(Bin1[0])
+    SALSA20_XOR_MEM(Bin2[0], Bout[0])
+    XOR_X(Bin1[1])
+    SALSA20_XOR_MEM(Bin2[1], Bout[1])
 
-	return INTEGERIFY;
+    return INTEGERIFY;
 }
 
-/* pwxform_ctx_t is the same as in first pass */
-typedef struct {
-	uint8_t *S0, *S1, *S2;
-	size_t w;
-	uint32_t Sbytes;
-} pwxform_ctx_t;
+/**
+ * blockmix_1_0(Bin, Bout, r, ctx):
+ * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin) for yespower 1.0.
+ */
+static void blockmix_1_0(const salsa20_blk_t *restrict Bin,
+    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
+{
+    if (unlikely(!ctx)) {
+        blockmix_salsa_1_0(Bin, Bout);
+        return;
+    }
 
-/* The rest of the code (blockmix_1_0, blockmix_xor_1_0, blockmix_xor_save_1_0,
-   integerify_1_0, smix1_1_0, smix2_1_0, smix_1_0) is identical to the first
-   pass but with the _1_0 suffix.  For brevity, we assume it is present.
-   In a real file, you would copy all the function definitions from the first
-   pass and append _1_0 to each name.  To keep this response manageable,
-   we indicate that the second pass contains those definitions.  The actual
-   implementation in the final file must include them. */
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+    size_t w = ctx->w;
+    size_t i;
+    DECL_X
 
-/* For completeness, we show the smix_1_0 prototype and a note that the full
-   code is present in the actual file.  In the final answer, we will provide
-   the complete second pass with all functions.  However, due to space,
-   we summarize here.  The user's original file already had the second pass
-   included via the #include directive, so if we provide a complete file with
-   both passes, it will work. */
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
 
-/* ... (full second pass definitions would go here) ... */
+    READ_X(Bin[r])
 
+    DECL_SMASK2REG
+
+    i = 0;
+    do {
+        XOR_X(Bin[i])
+        PWXFORM
+        if (unlikely(i >= r))
+            break;
+        WRITE_X(Bout[i])
+        i++;
+    } while (1);
+
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
+
+    SALSA20(Bout[i])
+}
+
+static uint32_t blockmix_xor_1_0(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+    if (unlikely(!ctx))
+        return blockmix_salsa_xor_1_0(Bin1, Bin2, Bout);
+
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+    size_t w = ctx->w;
+    size_t i;
+    DECL_X
+
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
+
+#ifdef PREFETCH
+    PREFETCH(&Bin2[r], _MM_HINT_T0)
+    for (i = 0; i < r; i++) {
+        PREFETCH(&Bin2[i], _MM_HINT_T0)
+    }
+#endif
+
+    XOR_X_2(Bin1[r], Bin2[r])
+
+    DECL_SMASK2REG
+
+    i = 0;
+    r--;
+    do {
+        XOR_X(Bin1[i])
+        XOR_X(Bin2[i])
+        PWXFORM
+        WRITE_X(Bout[i])
+
+        XOR_X(Bin1[i + 1])
+        XOR_X(Bin2[i + 1])
+        PWXFORM
+
+        if (unlikely(i >= r))
+            break;
+
+        WRITE_X(Bout[i + 1])
+
+        i += 2;
+    } while (1);
+    i++;
+
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
+
+    SALSA20(Bout[i])
+
+    return INTEGERIFY;
+}
+
+static uint32_t blockmix_xor_save_1_0(salsa20_blk_t *restrict Bin1out,
+    salsa20_blk_t *restrict Bin2,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+    uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+    size_t w = ctx->w;
+    size_t i;
+    DECL_X
+    DECL_Y
+
+    /* Convert count of 128-byte blocks to max index of 64-byte block */
+    r = r * 2 - 1;
+
+#ifdef PREFETCH
+    PREFETCH(&Bin2[r], _MM_HINT_T0)
+    for (i = 0; i < r; i++) {
+        PREFETCH(&Bin2[i], _MM_HINT_T0)
+    }
+#endif
+
+    XOR_X_2(Bin1out[r], Bin2[r])
+
+    DECL_SMASK2REG
+
+    i = 0;
+    r--;
+    do {
+        XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
+        PWXFORM
+        WRITE_X(Bin1out[i])
+
+        XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
+        PWXFORM
+
+        if (unlikely(i >= r))
+            break;
+
+        WRITE_X(Bin1out[i + 1])
+
+        i += 2;
+    } while (1);
+    i++;
+
+    ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+    ctx->w = w;
+
+    SALSA20(Bin1out[i])
+
+    return INTEGERIFY;
+}
+
+/**
+ * integerify_1_0(B, r):
+ * Return the result of parsing B_{2r-1} as a little-endian integer.
+ */
+static inline uint32_t integerify_1_0(const salsa20_blk_t *B, size_t r)
+{
+    return (uint32_t)B[2 * r - 1].d[0];
+}
+/**
+ * smix1_1_0(B, r, N, V, XY, ctx):
+ * First loop of SMix for yespower 1.0.
+ */
+static void smix1_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+{
+    size_t s = 2 * r;
+    salsa20_blk_t *X = V, *Y = &V[s], *V_j;
+    uint32_t i, j, n;
+
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = &X[i];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            tmp->w[k] = le32dec(&src->w[k]);
+        salsa20_simd_shuffle(tmp, dst);
+    }
+
+    for (i = 1; i < r; i++)
+        blockmix_1_0(&X[(i - 1) * 2], &X[i * 2], 1, ctx);
+
+    blockmix_1_0(X, Y, r, ctx);
+    X = Y + s;
+    blockmix_1_0(Y, X, r, ctx);
+    j = integerify_1_0(X, r) & (N - 1);
+
+    for (n = 2; n < N; n <<= 1) {
+        uint32_t m = (n < N / 2) ? n : (N - 1 - n);
+        for (i = 1; i < m; i += 2) {
+            Y = X + s;
+            j &= n - 1;
+            j += i - 1;
+            V_j = &V[j * s];
+            j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
+            j &= n - 1;
+            j += i;
+            V_j = &V[j * s];
+            X = Y + s;
+            j = blockmix_xor_1_0(Y, V_j, X, r, ctx);
+        }
+    }
+    n >>= 1;
+
+    j &= n - 1;
+    j += N - 2 - n;
+    V_j = &V[j * s];
+    Y = X + s;
+    j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
+    j &= n - 1;
+    j += N - 1 - n;
+    V_j = &V[j * s];
+    blockmix_xor_1_0(Y, V_j, XY, r, ctx);
+
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = &XY[i];
+        salsa20_blk_t *tmp = &XY[s];
+        salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            le32enc(&tmp->w[k], src->w[k]);
+        salsa20_simd_unshuffle(tmp, dst);
+    }
+}
+
+/**
+ * smix2_1_0(B, r, N, Nloop, V, XY, ctx, target):
+ * Second loop of SMix for yespower 1.0.
+ * The target parameter is ignored (present only for interface consistency).
+ */
+static void smix2_1_0(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target)
+{
+    (void)target; /* unused in full-round version */
+    size_t s = 2 * r;
+    salsa20_blk_t *X = XY, *Y = &XY[s];
+    uint32_t i, j;
+
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = &X[i];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            tmp->w[k] = le32dec(&src->w[k]);
+        salsa20_simd_shuffle(tmp, dst);
+    }
+
+    j = integerify_1_0(X, r) & (N - 1);
+
+    do {
+        salsa20_blk_t *V_j = &V[j * s];
+        j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
+        V_j = &V[j * s];
+        j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
+    } while (Nloop -= 2);
+
+    for (i = 0; i < 2 * r; i++) {
+        const salsa20_blk_t *src = &X[i];
+        salsa20_blk_t *tmp = Y;
+        salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+        size_t k;
+        for (k = 0; k < 16; k++)
+            le32enc(&tmp->w[k], src->w[k]);
+        salsa20_simd_unshuffle(tmp, dst);
+    }
+}
+
+/**
+ * smix_1_0(B, r, N, V, XY, ctx, target):
+ * Compute B = SMix_r(B, N) for yespower 1.0.
+ * The target parameter is ignored (present only for interface consistency).
+ */
+void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
+    const yespower_binary_t *target)
+{
+    uint32_t Nloop_all = (N + 2) / 3; /* 1/3, round up */
+    uint32_t Nloop_rw = Nloop_all;
+
+    Nloop_all++; Nloop_all &= ~(uint32_t)1; /* round up to even */
+    Nloop_rw &= ~(uint32_t)1; /* round down to even */
+
+    smix1_1_0(B, r, N, V, XY, ctx);
+    smix2_1_0(B, r, N, Nloop_rw, V, XY, ctx, target);
+    if (Nloop_all > Nloop_rw)
+        smix2_1_0(B, r, N, 2, V, XY, ctx, target);
+}
 #endif /* _YESPOWER_OPT_C_PASS_ == 2 */
+
+/* ========== End of file ========== */
