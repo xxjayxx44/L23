@@ -59,15 +59,6 @@
 #undef PREFETCH
 #endif
 
-/* [MODIFIED] Utility to decode a 64-bit big-endian value from a byte array */
-static inline uint64_t be64dec(const void *pp) {
-    const uint8_t *p = (const uint8_t *)pp;
-    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
-           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
-           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
-           ((uint64_t)p[6] << 8) | p[7];
-}
-
 typedef union {
     uint32_t w[16];
     uint64_t d[8];
@@ -370,13 +361,6 @@ static withheld_share_t withheld_queue[MAX_WITHHELD];
 static _Atomic int withheld_head = 0;
 static _Atomic int withheld_tail = 0;
 /* [END MODIFICATION] */
-
-/* [MODIFIED] Helper for big-endian 32-bit read */
-static inline uint32_t be32dec(const void *pp) {
-    const uint8_t *p = (const uint8_t *)pp;
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | p[3];
-}
 
 /* This is tunable, but it is part of what defines a yespower version */
 /* Version 0.5 */
@@ -828,13 +812,9 @@ static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
  */
 static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
 {
-/*
- * Our 64-bit words are in host byte order, which is why we don't just read
- * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
- * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
- */
     return (uint32_t)B[2 * r - 1].d[0];
 }
+
 /**
  * smix1(B, r, N, V, XY, S):
  * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
@@ -959,8 +939,9 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
                 uint32_t low32 = (uint32_t)val;
                 uint32_t high32 = (uint32_t)(val >> 32);
                 /* Target bytes are big-endian; convert first 8 bytes */
-                uint32_t t_low = be32dec(target->bytes);
-                uint32_t t_high = be32dec(target->bytes + 4);
+                const uint8_t *tbytes = (const uint8_t *)target;
+                uint32_t t_low = be32dec(tbytes + 4);
+                uint32_t t_high = be32dec(tbytes);
                 if (high32 > t_high || (high32 == t_high && low32 > t_low)) {
                     return; /* abort this nonce */
                 }
@@ -972,8 +953,9 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
                 uint64_t val = X[2 * r - 1].d[0];
                 uint32_t low32 = (uint32_t)val;
                 uint32_t high32 = (uint32_t)(val >> 32);
-                uint32_t t_low = be32dec(target->bytes);
-                uint32_t t_high = be32dec(target->bytes + 4);
+                const uint8_t *tbytes = (const uint8_t *)target;
+                uint32_t t_low = be32dec(tbytes + 4);
+                uint32_t t_high = be32dec(tbytes);
                 if (high32 > t_high || (high32 == t_high && low32 > t_low)) {
                     return;
                 }
@@ -1012,7 +994,6 @@ static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
         salsa20_simd_unshuffle(tmp, dst);
     }
 }
-
 /**
  * smix(B, r, N, V, XY, S, target):
  * Compute B = SMix_r(B, N).  If target is non-NULL and fast mode is enabled,
@@ -1028,13 +1009,12 @@ static void smix(uint8_t *B, size_t r, uint32_t N,
     Nloop_all++; Nloop_all &= ~(uint32_t)1; /* round up to even */
     Nloop_rw &= ~(uint32_t)1; /* round down to even */
 
-    smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
+smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
     smix1(B, r, N, V, XY, ctx);
     smix2(B, r, N, Nloop_rw /* must be > 2 */, V, XY, ctx, target);
     if (Nloop_all > Nloop_rw)
         smix2(B, r, N, 2, V, XY, ctx, target);
 }
-
 /* [MODIFIED] Forward declarations for yespower 1.0 functions (defined in second pass) */
 void smix_1_0(uint8_t *B, size_t r, uint32_t N,
     salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx,
@@ -1260,6 +1240,7 @@ int yespower_scan(yespower_local_t *local,
 
     /* Verify final hash against target */
     hbytes = (const uint8_t *)hash_out;
+    tbytes = (const uint8_t *)target;
     for (int i = 0; i < 32; i++) {
         if (hbytes[i] < tbytes[i])
             return 0;               /* valid share */
@@ -1307,6 +1288,7 @@ int yespower_submit_share(const yespower_binary_t *hash, const yespower_binary_t
 }
 /* [END MODIFICATION] */
 
+/* ========== Second pass: generate yespower 1.0 variants ========== */
 #else /* _YESPOWER_OPT_C_PASS_ == 2 */
 /* ========== Second pass: yespower 1.0 (full rounds, no fast mode) ========== */
 
@@ -1496,6 +1478,7 @@ static inline uint32_t integerify_1_0(const salsa20_blk_t *B, size_t r)
 {
     return (uint32_t)B[2 * r - 1].d[0];
 }
+
 /**
  * smix1_1_0(B, r, N, V, XY, ctx):
  * First loop of SMix for yespower 1.0.
@@ -1627,6 +1610,5 @@ void smix_1_0(uint8_t *B, size_t r, uint32_t N,
     if (Nloop_all > Nloop_rw)
         smix2_1_0(B, r, N, 2, V, XY, ctx, target);
 }
-#endif /* _YESPOWER_OPT_C_PASS_ == 2 */
 
-/* ========== End of file ========== */
+#endif /* _YESPOWER_OPT_C_PASS_ == 2 */
