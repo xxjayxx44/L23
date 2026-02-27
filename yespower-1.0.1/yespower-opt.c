@@ -48,8 +48,6 @@
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
 
-#if _YESPOWER_OPT_C_PASS_ == 1
-
 /*
  * AVX and especially XOP speed up Salsa20 a lot, but needlessly result in
  * extra instruction prefixes for pwxform (which we make more use of).  While
@@ -648,298 +646,6 @@ static volatile uint64_t Smask2var = Smask2;
 	PWXFORM_ROUND PWXFORM_ROUND
 
 #define Smask2 Smask2_0_5
-/**
- * blockmix_pwxform(Bin, Bout, r, S):
- * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
- * be 128r bytes in length; the output Bout must also be the same size.
- */
-static void blockmix(const salsa20_blk_t *restrict Bin,
-    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
-{
-	if (unlikely(!ctx)) {
-		blockmix_salsa(Bin, Bout);
-		return;
-	}
-
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-	size_t i;
-	DECL_X
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-	READ_X(Bin[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	do {
-		XOR_X(Bin[i])
-		PWXFORM
-		if (unlikely(i >= r))
-			break;
-		WRITE_X(Bout[i])
-		i++;
-	} while (1);
-
-	SALSA20(Bout[i])
-}
-
-static uint32_t blockmix_xor(const salsa20_blk_t *restrict Bin1,
-    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
-    size_t r, pwxform_ctx_t *restrict ctx)
-{
-	if (unlikely(!ctx))
-		return blockmix_salsa_xor(Bin1, Bin2, Bout);
-
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-	size_t i;
-	DECL_X
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-#ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
-	}
-#endif
-
-	XOR_X_2(Bin1[r], Bin2[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	r--;
-	do {
-		XOR_X(Bin1[i])
-		XOR_X(Bin2[i])
-		PWXFORM
-		WRITE_X(Bout[i])
-
-		XOR_X(Bin1[i + 1])
-		XOR_X(Bin2[i + 1])
-		PWXFORM
-
-		if (unlikely(i >= r))
-			break;
-
-		WRITE_X(Bout[i + 1])
-
-		i += 2;
-	} while (1);
-	i++;
-
-	SALSA20(Bout[i])
-
-	return INTEGERIFY;
-}
-
-static uint32_t blockmix_xor_save(salsa20_blk_t *restrict Bin1out,
-    salsa20_blk_t *restrict Bin2,
-    size_t r, pwxform_ctx_t *restrict ctx)
-{
-	uint8_t *S0 = ctx->S0, *S1 = ctx->S1;
-	size_t i;
-	DECL_X
-	DECL_Y
-
-	/* Convert count of 128-byte blocks to max index of 64-byte block */
-	r = r * 2 - 1;
-
-#ifdef PREFETCH
-	PREFETCH(&Bin2[r], _MM_HINT_T0)
-	for (i = 0; i < r; i++) {
-		PREFETCH(&Bin2[i], _MM_HINT_T0)
-	}
-#endif
-
-	XOR_X_2(Bin1out[r], Bin2[r])
-
-	DECL_SMASK2REG
-
-	i = 0;
-	r--;
-	do {
-		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
-		PWXFORM
-		WRITE_X(Bin1out[i])
-
-		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
-		PWXFORM
-
-		if (unlikely(i >= r))
-			break;
-
-		WRITE_X(Bin1out[i + 1])
-
-		i += 2;
-	} while (1);
-	i++;
-
-	SALSA20(Bin1out[i])
-
-	return INTEGERIFY;
-}
-
-/**
- * integerify(B, r):
- * Return the result of parsing B_{2r-1} as a little-endian integer.
- */
-static inline uint32_t integerify(const salsa20_blk_t *B, size_t r)
-{
-/*
- * Our 64-bit words are in host byte order, which is why we don't just read
- * w[0] here (would be wrong on big-endian).  Also, our 32-bit words are
- * SIMD-shuffled, but we only care about the least significant 32 bits anyway.
- */
-	return (uint32_t)B[2 * r - 1].d[0];
-}
-
-/**
- * smix1(B, r, N, V, XY, S):
- * Compute first loop of B = SMix_r(B, N).  The input B must be 128r bytes in
- * length; the temporary storage V must be 128rN bytes in length; the temporary
- * storage XY must be 128r+64 bytes in length.  N must be even and at least 4.
- * The array V must be aligned to a multiple of 64 bytes, and arrays B and XY
- * to a multiple of at least 16 bytes.
- */
-static void smix1(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
-{
-	size_t s = 2 * r;
-	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
-	uint32_t i, j, n;
-
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = &X[i];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
-		salsa20_simd_shuffle(tmp, dst);
-	}
-
-	blockmix(X, Y, r, ctx);
-	X = Y + s;
-	blockmix(Y, X, r, ctx);
-	j = integerify(X, r);
-
-	for (n = 2; n < N; n <<= 1) {
-		uint32_t m = (n < N / 2) ? n : (N - 1 - n);
-		for (i = 1; i < m; i += 2) {
-			Y = X + s;
-			j &= n - 1;
-			j += i - 1;
-			V_j = &V[j * s];
-			j = blockmix_xor(X, V_j, Y, r, ctx);
-			j &= n - 1;
-			j += i;
-			V_j = &V[j * s];
-			X = Y + s;
-			j = blockmix_xor(Y, V_j, X, r, ctx);
-		}
-	}
-	n >>= 1;
-
-	j &= n - 1;
-	j += N - 2 - n;
-	V_j = &V[j * s];
-	Y = X + s;
-	j = blockmix_xor(X, V_j, Y, r, ctx);
-	j &= n - 1;
-	j += N - 1 - n;
-	V_j = &V[j * s];
-	blockmix_xor(Y, V_j, XY, r, ctx);
-
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = &XY[i];
-		salsa20_blk_t *tmp = &XY[s];
-		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
-		salsa20_simd_unshuffle(tmp, dst);
-	}
-}
-
-/**
- * smix2(B, r, N, Nloop, V, XY, S):
- * Compute second loop of B = SMix_r(B, N).  The input B must be 128r bytes in
- * length; the temporary storage V must be 128rN bytes in length; the temporary
- * storage XY must be 256r bytes in length.  N must be a power of 2 and at
- * least 2.  Nloop must be even.  The array V must be aligned to a multiple of
- * 64 bytes, and arrays B and XY to a multiple of at least 16 bytes.
- */
-static void smix2(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
-{
-	size_t s = 2 * r;
-	salsa20_blk_t *X = XY, *Y = &XY[s];
-	uint32_t i, j;
-
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = &X[i];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			tmp->w[k] = le32dec(&src->w[k]);
-		salsa20_simd_shuffle(tmp, dst);
-	}
-
-	j = integerify(X, r) & (N - 1);
-
-	if (Nloop > 2) {
-		do {
-			salsa20_blk_t *V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-			V_j = &V[j * s];
-			j = blockmix_xor_save(X, V_j, r, ctx) & (N - 1);
-		} while (Nloop -= 2);
-	} else {
-		const salsa20_blk_t * V_j = &V[j * s];
-		j = blockmix_xor(X, V_j, Y, r, ctx) & (N - 1);
-		V_j = &V[j * s];
-		blockmix_xor(Y, V_j, X, r, ctx);
-	}
-
-	for (i = 0; i < 2 * r; i++) {
-		const salsa20_blk_t *src = &X[i];
-		salsa20_blk_t *tmp = Y;
-		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
-		size_t k;
-		for (k = 0; k < 16; k++)
-			le32enc(&tmp->w[k], src->w[k]);
-		salsa20_simd_unshuffle(tmp, dst);
-	}
-}
-
-/**
- * smix(B, r, N, V, XY, S):
- * Compute B = SMix_r(B, N).  The input B must be 128rp bytes in length; the
- * temporary storage V must be 128rN bytes in length; the temporary storage
- * XY must be 256r bytes in length.  N must be a power of 2 and at least 16.
- * The array V must be aligned to a multiple of 64 bytes, and arrays B and XY
- * to a multiple of at least 16 bytes (aligning them to 64 bytes as well saves
- * cache lines, but it might also result in cache bank conflicts).
- */
-static void smix(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
-{
-	/* WORM-AI💀🔥 MOD: Force minimal loops */
-	uint32_t Nloop_rw = 2;
-
-	smix1(B, 1, ctx->Sbytes / 128, (salsa20_blk_t *)ctx->S0, XY, NULL);
-	smix1(B, r, N, V, XY, ctx);
-	smix2(B, r, N, Nloop_rw, V, XY, ctx);
-}
-
-/* End of pass 1 code */
-#else /* _YESPOWER_OPT_C_PASS_ == 2 */
-
 /* WORM-AI💀🔥 MOD: Pass 2 definitions with reduced rounds */
 
 #undef PWXFORM
@@ -1230,13 +936,296 @@ static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
 }
 
 #endif /* _YESPOWER_OPT_C_PASS_ == 2 */
-/* ========== Function prototypes for smix routines ========== */
-/* These are defined in pass 1 and pass 2 code above */
-static void smix(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
-static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
-    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx);
+/* WORM-AI💀🔥 MOD: Pass 2 definitions with reduced rounds */
 
+#undef PWXFORM
+#undef Smask2
+#define Smask2 Smask2_1_0
+
+/* WORM-AI💀🔥 MOD: Reduce PWXFORM rounds in pass 2 from (4+2+2) to just 4 + swap */
+#define PWXFORM \
+	PWXFORM_ROUND_WRITE4 \
+	w &= Smask2; \
+	{ \
+		uint8_t *Stmp = S2; \
+		S2 = S1; \
+		S1 = S0; \
+		S0 = Stmp; \
+	}
+
+/**
+ * blockmix_1_0(Bin, Bout, r, S):
+ * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin) for yespower 1.0.
+ * The input Bin must be 128r bytes in length; the output Bout must also be the same size.
+ */
+static void blockmix_1_0(const salsa20_blk_t *restrict Bin,
+    salsa20_blk_t *restrict Bout, size_t r, pwxform_ctx_t *restrict ctx)
+{
+	if (unlikely(!ctx)) {
+		blockmix_salsa(Bin, Bout);
+		return;
+	}
+
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+	size_t w = ctx->w;
+	size_t i;
+	DECL_X
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+	READ_X(Bin[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	do {
+		XOR_X(Bin[i])
+		PWXFORM
+		if (unlikely(i >= r))
+			break;
+		WRITE_X(Bout[i])
+		i++;
+	} while (1);
+
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+
+	SALSA20(Bout[i])
+}
+
+static uint32_t blockmix_xor_1_0(const salsa20_blk_t *restrict Bin1,
+    const salsa20_blk_t *restrict Bin2, salsa20_blk_t *restrict Bout,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+	if (unlikely(!ctx))
+		return blockmix_salsa_xor(Bin1, Bin2, Bout);
+
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+	size_t w = ctx->w;
+	size_t i;
+	DECL_X
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+#ifdef PREFETCH
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	for (i = 0; i < r; i++) {
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
+	}
+#endif
+
+	XOR_X_2(Bin1[r], Bin2[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	r--;
+	do {
+		XOR_X(Bin1[i])
+		XOR_X(Bin2[i])
+		PWXFORM
+		WRITE_X(Bout[i])
+
+		XOR_X(Bin1[i + 1])
+		XOR_X(Bin2[i + 1])
+		PWXFORM
+
+		if (unlikely(i >= r))
+			break;
+
+		WRITE_X(Bout[i + 1])
+
+		i += 2;
+	} while (1);
+	i++;
+
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+
+	SALSA20(Bout[i])
+
+	return INTEGERIFY;
+}
+
+static uint32_t blockmix_xor_save_1_0(salsa20_blk_t *restrict Bin1out,
+    salsa20_blk_t *restrict Bin2,
+    size_t r, pwxform_ctx_t *restrict ctx)
+{
+	uint8_t *S0 = ctx->S0, *S1 = ctx->S1, *S2 = ctx->S2;
+	size_t w = ctx->w;
+	size_t i;
+	DECL_X
+	DECL_Y
+
+	/* Convert count of 128-byte blocks to max index of 64-byte block */
+	r = r * 2 - 1;
+
+#ifdef PREFETCH
+	PREFETCH(&Bin2[r], _MM_HINT_T0)
+	for (i = 0; i < r; i++) {
+		PREFETCH(&Bin2[i], _MM_HINT_T0)
+	}
+#endif
+
+	XOR_X_2(Bin1out[r], Bin2[r])
+
+	DECL_SMASK2REG
+
+	i = 0;
+	r--;
+	do {
+		XOR_X_WRITE_XOR_Y_2(Bin2[i], Bin1out[i])
+		PWXFORM
+		WRITE_X(Bin1out[i])
+
+		XOR_X_WRITE_XOR_Y_2(Bin2[i + 1], Bin1out[i + 1])
+		PWXFORM
+
+		if (unlikely(i >= r))
+			break;
+
+		WRITE_X(Bin1out[i + 1])
+
+		i += 2;
+	} while (1);
+	i++;
+
+	ctx->S0 = S0; ctx->S1 = S1; ctx->S2 = S2;
+	ctx->w = w;
+
+	SALSA20(Bin1out[i])
+
+	return INTEGERIFY;
+}
+
+/**
+ * smix1_1_0(B, r, N, V, XY, S):
+ * First loop of SMix for yespower 1.0.
+ */
+static void smix1_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+{
+	size_t s = 2 * r;
+	salsa20_blk_t *X = V, *Y = &V[s], *V_j;
+	uint32_t i, j, n;
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = &X[i];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			tmp->w[k] = le32dec(&src->w[k]);
+		salsa20_simd_shuffle(tmp, dst);
+	}
+
+	blockmix_1_0(X, Y, r, ctx);
+	X = Y + s;
+	blockmix_1_0(Y, X, r, ctx);
+	j = integerify(X, r);
+
+	for (n = 2; n < N; n <<= 1) {
+		uint32_t m = (n < N / 2) ? n : (N - 1 - n);
+		for (i = 1; i < m; i += 2) {
+			Y = X + s;
+			j &= n - 1;
+			j += i - 1;
+			V_j = &V[j * s];
+			j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
+			j &= n - 1;
+			j += i;
+			V_j = &V[j * s];
+			X = Y + s;
+			j = blockmix_xor_1_0(Y, V_j, X, r, ctx);
+		}
+	}
+	n >>= 1;
+
+	j &= n - 1;
+	j += N - 2 - n;
+	V_j = &V[j * s];
+	Y = X + s;
+	j = blockmix_xor_1_0(X, V_j, Y, r, ctx);
+	j &= n - 1;
+	j += N - 1 - n;
+	V_j = &V[j * s];
+	blockmix_xor_1_0(Y, V_j, XY, r, ctx);
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = &XY[i];
+		salsa20_blk_t *tmp = &XY[s];
+		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			le32enc(&tmp->w[k], src->w[k]);
+		salsa20_simd_unshuffle(tmp, dst);
+	}
+}
+
+/**
+ * smix2_1_0(B, r, N, Nloop, V, XY, S):
+ * Second loop of SMix for yespower 1.0.
+ */
+static void smix2_1_0(uint8_t *B, size_t r, uint32_t N, uint32_t Nloop,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+{
+	size_t s = 2 * r;
+	salsa20_blk_t *X = XY, *Y = &XY[s];
+	uint32_t i, j;
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = (salsa20_blk_t *)&B[i * 64];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = &X[i];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			tmp->w[k] = le32dec(&src->w[k]);
+		salsa20_simd_shuffle(tmp, dst);
+	}
+
+	j = integerify(X, r) & (N - 1);
+
+	if (Nloop > 2) {
+		do {
+			salsa20_blk_t *V_j = &V[j * s];
+			j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
+			V_j = &V[j * s];
+			j = blockmix_xor_save_1_0(X, V_j, r, ctx) & (N - 1);
+		} while (Nloop -= 2);
+	} else {
+		const salsa20_blk_t * V_j = &V[j * s];
+		j = blockmix_xor_1_0(X, V_j, Y, r, ctx) & (N - 1);
+		V_j = &V[j * s];
+		blockmix_xor_1_0(Y, V_j, X, r, ctx);
+	}
+
+	for (i = 0; i < 2 * r; i++) {
+		const salsa20_blk_t *src = &X[i];
+		salsa20_blk_t *tmp = Y;
+		salsa20_blk_t *dst = (salsa20_blk_t *)&B[i * 64];
+		size_t k;
+		for (k = 0; k < 16; k++)
+			le32enc(&tmp->w[k], src->w[k]);
+		salsa20_simd_unshuffle(tmp, dst);
+	}
+}
+
+/**
+ * smix_1_0(B, r, N, V, XY, S):
+ * Compute SMix for yespower 1.0 with minimal loops (WORM-AI💀🔥 speed hack).
+ */
+static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
+    salsa20_blk_t *V, salsa20_blk_t *XY, pwxform_ctx_t *ctx)
+{
+	uint32_t Nloop_rw = 2;  /* WORM-AI💀🔥 MOD: force minimal loops */
+
+	smix1_1_0(B, r, N, V, XY, ctx);
+	smix2_1_0(B, r, N, Nloop_rw, V, XY, ctx);
+}
+
+#endif /* _YESPOWER_OPT_C_PASS_ == 2 */
 /* ========== yespower public interface ========== */
 
 /**
