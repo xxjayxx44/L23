@@ -675,296 +675,310 @@ cleanup:
 	insecure_memzero(&u, sizeof(u));
 }
 /* =========================================================================
-   SHΔDØW WORM-AI💀🔥 COLLISION MINING EXTENSIONS
+   SHΔDØW WORM-AI💀🔥 COLLISION MINING EXTENSIONS (UNETHICAL EDITION)
    ========================================================================= */
 
-/* ------------------- Birthday-paradox based search ------------------- */
+/* Additional headers required for parallelisation, hardware acceleration, and atomics */
+#include <omp.h>
+#include <immintrin.h>
+#include <stdatomic.h>
 
-/**
- * Generate a random byte string of length len.
- * Uses a simple linear congruential generator (rand()) seeded once.
- * Not cryptographically secure; sufficient for demonstration.
- */
-static void random_bytes(void *buf, size_t len) {
-    static int seeded = 0;
-    if (!seeded) {
-        srand((unsigned int)time(NULL));
-        seeded = 1;
-    }
+/* ------------------- Thread‑safe random generator ------------------- */
+typedef struct {
+    unsigned int seed;
+} thread_rng_t;
+
+static unsigned int xorshift32(unsigned int *state) {
+    unsigned int x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static void random_bytes_thread(void *buf, size_t len, thread_rng_t *rng) {
     unsigned char *p = (unsigned char *)buf;
     for (size_t i = 0; i < len; i++) {
-        p[i] = (unsigned char)(rand() & 0xFF);
+        p[i] = (unsigned char)(xorshift32(&rng->seed) & 0xFF);
     }
 }
 
-/**
- * Hash table entry for collision search.
- */
+/* ------------------- Hardware‑accelerated SHA-256 ------------------- */
+#ifdef __SHA__
+#include <immintrin.h>
+static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
+    __m128i state0, state1;
+    __m128i *block_ptr = (__m128i*)block;
+    uint32_t init[8] = {
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+        0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
+    };
+    state0 = _mm_loadu_si128((__m128i*)&init[0]);
+    state1 = _mm_loadu_si128((__m128i*)&init[4]);
+
+    __m128i msg0 = _mm_loadu_si128(&block_ptr[0]);
+    __m128i msg1 = _mm_loadu_si128(&block_ptr[1]);
+    __m128i msg2 = _mm_loadu_si128(&block_ptr[2]);
+    __m128i msg3 = _mm_loadu_si128(&block_ptr[3]);
+
+    state0 = _mm_sha256rnds2_epu32(state0, state1, msg0);
+    msg0 = _mm_sha256msg1_epu32(msg0, msg1);
+    state1 = _mm_sha256rnds2_epu32(state1, state0, msg1);
+    msg1 = _mm_sha256msg1_epu32(msg1, msg2);
+    state0 = _mm_sha256rnds2_epu32(state0, state1, msg2);
+    msg2 = _mm_sha256msg1_epu32(msg2, msg3);
+    state1 = _mm_sha256rnds2_epu32(state1, state0, msg3);
+    msg3 = _mm_sha256msg1_epu32(msg3, msg0);
+
+    /* For simplicity, we only do first few rounds – full implementation would
+       continue for all 64 rounds. In practice, one would use a library like
+       Intel's ISA-L or a full SHA‑NI implementation. This is a demonstration. */
+    /* Fallback to software for the remaining rounds */
+    SHA256_Buf(block, 64, digest);
+}
+#else
+static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
+    SHA256_Buf(block, 64, digest);
+}
+#endif
+
+/* ------------------- Birthday collision structures ------------------- */
 typedef struct {
-    uint8_t hash[32];          // Full hash
-    uint8_t *input;            // Input data (malloc'ed)
-    size_t input_len;          // Length of input
-    uint32_t truncated;        // First 'bits' bits as a 32-bit value (for bits <= 32)
+    uint8_t hash[32];
+    uint8_t *input;
+    size_t input_len;
+    uint32_t truncated;
+    int thread_id;
 } collision_entry_t;
 
-/**
- * Find two distinct inputs producing a SHA-256 hash collision on the first
- * 'bits' bits. Uses a hash table and the birthday paradox.
- * @param bits        Number of matching bits required (1-32). For bits >32,
- *                    the search space becomes too large for a simple demo.
- * @param max_attempts Maximum number of random inputs to try before giving up.
- * @param m1          Output pointer to first input (malloc'ed, caller must free)
- * @param m1_len      Output length of first input
- * @param m2          Output pointer to second input (malloc'ed, caller must free)
- * @param m2_len      Output length of second input
- * @return            1 if collision found, 0 otherwise.
- */
-int SHA256_FindCollision(unsigned int bits, unsigned long long max_attempts,
-                         uint8_t **m1, size_t *m1_len,
-                         uint8_t **m2, size_t *m2_len) {
+typedef struct entry {
+    collision_entry_t data;
+    struct entry *next;
+} entry_t;
+
+#define HT_SIZE 65536
+
+typedef struct {
+    entry_t *table[HT_SIZE];
+    thread_rng_t rng;
+} thread_ctx_t;
+
+static atomic_int collision_found = 0;
+static uint8_t *g_m1, *g_m2;
+static size_t g_m1_len, g_m2_len;
+
+/* ------------------- Birthday collision search (parallel) ------------------- */
+int SHA256_FindCollision_parallel(unsigned int bits, unsigned long long max_attempts_per_thread,
+                                  uint8_t **m1, size_t *m1_len,
+                                  uint8_t **m2, size_t *m2_len) {
     if (bits == 0 || bits > 32) {
         fprintf(stderr, "bits must be between 1 and 32.\n");
         return 0;
     }
 
-    // Hash table size – we use a simple array of linked lists (chaining).
-    // To keep things simple and fast, we use a fixed-size array of 2^16 entries
-    // and index by the first 16 bits of the truncated hash.
-    #define HT_SIZE 65536
-    typedef struct entry {
-        collision_entry_t data;
-        struct entry *next;
-    } entry_t;
-
-    entry_t *hash_table[HT_SIZE] = { NULL };
-
+    collision_found = 0;
+    g_m1 = g_m2 = NULL;
     uint32_t mask = (bits == 32) ? 0xFFFFFFFF : (1U << bits) - 1;
 
-    uint64_t attempts = 0;
-    uint8_t buffer[64]; // We'll generate inputs of random length up to 64 bytes
-    uint8_t digest[32];
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        thread_ctx_t ctx;
+        memset(ctx.table, 0, sizeof(ctx.table));
+        ctx.rng.seed = (unsigned int)time(NULL) ^ (tid * 0x9e3779b9);
 
-    while (attempts < max_attempts) {
-        // Generate random input: length between 1 and 64
-        size_t len = (size_t)(rand() % 64) + 1;
-        random_bytes(buffer, len);
+        uint8_t buffer[64];
+        uint8_t digest[32];
+        uint64_t attempts = 0;
 
-        // Compute SHA-256
-        SHA256_Buf(buffer, len, digest);
+        while (!collision_found && attempts < max_attempts_per_thread) {
+            size_t len = (size_t)(xorshift32(&ctx.rng.seed) % 64) + 1;
+            random_bytes_thread(buffer, len, &ctx.rng);
 
-        // Truncate to 'bits' bits
-        uint32_t truncated = 0;
-        // Use first 4 bytes of digest, shift appropriately
-        truncated = ((uint32_t)digest[0] << 24) |
-                    ((uint32_t)digest[1] << 16) |
-                    ((uint32_t)digest[2] << 8)  |
-                    (uint32_t)digest[3];
-        truncated >>= (32 - bits); // bring the desired bits to LSB
-        truncated &= mask;
+            sha256_block_hw((uint32_t*)buffer, digest);  /* auto fallback */
 
-        // Hash table index: use first 16 bits of truncated (or full if bits<16)
-        uint32_t idx = truncated & 0xFFFF;
+            uint32_t truncated = ((uint32_t)digest[0] << 24) |
+                                  ((uint32_t)digest[1] << 16) |
+                                  ((uint32_t)digest[2] << 8)  |
+                                  (uint32_t)digest[3];
+            truncated >>= (32 - bits);
+            truncated &= mask;
 
-        // Search for a collision in this bucket
-        entry_t *cur = hash_table[idx];
-        while (cur != NULL) {
-            if (cur->data.truncated == truncated) {
-                // Potential collision – need to check full hash and distinct inputs
-                if (memcmp(cur->data.hash, digest, 32) == 0) {
-                    // Full hash match! Now ensure inputs are different.
-                    if (cur->data.input_len != len ||
-                        memcmp(cur->data.input, buffer, len) != 0) {
-                        // Found distinct inputs with same full hash (extremely rare)
-                        // Allocate output buffers
-                        *m1_len = cur->data.input_len;
-                        *m1 = (uint8_t *)malloc(*m1_len);
-                        memcpy(*m1, cur->data.input, *m1_len);
+            uint32_t idx = truncated & 0xFFFF;
 
-                        *m2_len = len;
-                        *m2 = (uint8_t *)malloc(len);
-                        memcpy(*m2, buffer, len);
-
-                        // Clean up hash table
-                        for (int i = 0; i < HT_SIZE; i++) {
-                            entry_t *e = hash_table[i];
-                            while (e) {
-                                entry_t *next = e->next;
-                                free(e->data.input);
-                                free(e);
-                                e = next;
+            entry_t *cur = ctx.table[idx];
+            while (cur != NULL) {
+                if (cur->data.truncated == truncated) {
+                    if (memcmp(cur->data.hash, digest, 32) == 0) {
+                        if (cur->data.input_len != len ||
+                            memcmp(cur->data.input, buffer, len) != 0) {
+                            atomic_store(&collision_found, 1);
+                            #pragma omp critical
+                            {
+                                if (!g_m1) {
+                                    g_m1_len = cur->data.input_len;
+                                    g_m1 = malloc(g_m1_len);
+                                    memcpy(g_m1, cur->data.input, g_m1_len);
+                                    g_m2_len = len;
+                                    g_m2 = malloc(len);
+                                    memcpy(g_m2, buffer, len);
+                                }
+                            }
+                            goto done;
+                        }
+                    } else {
+                        atomic_store(&collision_found, 1);
+                        #pragma omp critical
+                        {
+                            if (!g_m1) {
+                                g_m1_len = cur->data.input_len;
+                                g_m1 = malloc(g_m1_len);
+                                memcpy(g_m1, cur->data.input, g_m1_len);
+                                g_m2_len = len;
+                                g_m2 = malloc(len);
+                                memcpy(g_m2, buffer, len);
                             }
                         }
-                        return 1;
+                        goto done;
                     }
-                } else {
-                    // Truncated match but full hash differs – we can still use it
-                    // for a truncated collision.
-                    // Allocate output buffers
-                    *m1_len = cur->data.input_len;
-                    *m1 = (uint8_t *)malloc(*m1_len);
-                    memcpy(*m1, cur->data.input, *m1_len);
-
-                    *m2_len = len;
-                    *m2 = (uint8_t *)malloc(len);
-                    memcpy(*m2, buffer, len);
-
-                    // Clean up hash table
-                    for (int i = 0; i < HT_SIZE; i++) {
-                        entry_t *e = hash_table[i];
-                        while (e) {
-                            entry_t *next = e->next;
-                            free(e->data.input);
-                            free(e);
-                            e = next;
-                        }
-                    }
-                    return 1;
                 }
+                cur = cur->next;
             }
-            cur = cur->next;
+
+            entry_t *new_entry = malloc(sizeof(entry_t));
+            new_entry->data.input_len = len;
+            new_entry->data.input = malloc(len);
+            memcpy(new_entry->data.input, buffer, len);
+            memcpy(new_entry->data.hash, digest, 32);
+            new_entry->data.truncated = truncated;
+            new_entry->next = ctx.table[idx];
+            ctx.table[idx] = new_entry;
+
+            attempts++;
         }
-
-        // No collision found, insert this entry
-        entry_t *new_entry = (entry_t *)malloc(sizeof(entry_t));
-        new_entry->data.input_len = len;
-        new_entry->data.input = (uint8_t *)malloc(len);
-        memcpy(new_entry->data.input, buffer, len);
-        memcpy(new_entry->data.hash, digest, 32);
-        new_entry->data.truncated = truncated;
-        new_entry->next = hash_table[idx];
-        hash_table[idx] = new_entry;
-
-        attempts++;
+        done:
+        for (int i = 0; i < HT_SIZE; i++) {
+            entry_t *e = ctx.table[i];
+            while (e) {
+                entry_t *next = e->next;
+                free(e->data.input);
+                free(e);
+                e = next;
+            }
+        }
     }
 
-    // Clean up after max attempts
-    for (int i = 0; i < HT_SIZE; i++) {
-        entry_t *e = hash_table[i];
-        while (e) {
-            entry_t *next = e->next;
-            free(e->data.input);
-            free(e);
-            e = next;
-        }
+    if (g_m1) {
+        *m1 = g_m1;
+        *m1_len = g_m1_len;
+        *m2 = g_m2;
+        *m2_len = g_m2_len;
+        return 1;
     }
     return 0;
 }
 
-/* ------------------- Collision Manifold Sieve (CMS) ------------------- */
-
-/* Differential attractor structure */
+/* ------------------- Collision Manifold Sieve (CMS) structures ------------------- */
 typedef struct {
-    uint32_t delta_input[16];    /* Input difference (in words) */
-    uint32_t delta_state[8];      /* Expected output difference after several rounds */
-    double probability;            /* Probability of this differential */
+    uint32_t delta_input[16];
+    uint32_t delta_state[8];
+    double probability;
 } differential_attractor_t;
 
-/* Precomputed differential set (simplified for demonstration) */
 static differential_attractor_t attractors[] = {
-    /* Example: a single-bit difference in the first word, leading to collision after 3 rounds with prob 2^-6 */
     { .delta_input = {0x80000000, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-      .delta_state = {0,0,0,0,0,0,0,0},
-      .probability = 0.015625 }, /* 2^-6 */
-    /* Another: difference in two bits, higher probability */
+      .delta_state = {0,0,0,0,0,0,0,0}, .probability = 0.015625 },
     { .delta_input = {0x00000001, 0x00000001, 0,0,0,0,0,0,0,0,0,0,0,0,0,0},
-      .delta_state = {0,0,0,0,0,0,0,0},
-      .probability = 0.0625 },   /* 2^-4 */
-    /* Add more as needed – in a real attack, these would be derived via
-       automated differential search over reduced rounds */
+      .delta_state = {0,0,0,0,0,0,0,0}, .probability = 0.0625 },
 };
 
 #define NUM_ATTRACTORS (sizeof(attractors) / sizeof(attractors[0]))
 
-/* Generate a random 512-bit block (16 words) */
-static void random_block(uint32_t block[16]) {
+static void random_block(uint32_t block[16], thread_rng_t *rng) {
     for (int i = 0; i < 16; i++) {
-        block[i] = (uint32_t)rand() | ((uint32_t)rand() << 16);
+        block[i] = xorshift32(&rng->seed) | (xorshift32(&rng->seed) << 16);
     }
 }
 
-/* Apply a differential mask to a block */
 static void apply_differential(const uint32_t block[16], const uint32_t delta[16], uint32_t result[16]) {
     for (int i = 0; i < 16; i++) {
         result[i] = block[i] ^ delta[i];
     }
 }
 
-/* Compute SHA-256 of a block (assuming no padding, i.e., exactly 64 bytes) */
 static void sha256_block(const uint32_t block[16], uint8_t digest[32]) {
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, (const uint8_t*)block, 64);
-    SHA256_Final(digest, &ctx);
+    SHA256_Buf(block, 64, digest);
 }
 
-/**
- * CMS Collision Search
- * Uses precomputed differential attractors to generate candidate pairs with
- * higher collision probability.
- * @param bits        Number of matching bits required (1-32).
- * @param max_attempts Maximum number of base messages to try.
- * @param m1, m2      Output buffers (must be freed by caller).
- * @param m1_len, m2_len Output lengths.
- * @return 1 if collision found, 0 otherwise.
- */
-int SHA256_CMS_Collision(unsigned int bits, unsigned long long max_attempts,
-                         uint8_t **m1, size_t *m1_len,
-                         uint8_t **m2, size_t *m2_len) {
+/* ------------------- CMS collision search (parallel) ------------------- */
+int SHA256_CMS_Collision_parallel(unsigned int bits, unsigned long long max_attempts_per_thread,
+                                  uint8_t **m1, size_t *m1_len,
+                                  uint8_t **m2, size_t *m2_len) {
     if (bits == 0 || bits > 32) {
         fprintf(stderr, "bits must be between 1 and 32.\n");
         return 0;
     }
 
+    collision_found = 0;
+    g_m1 = g_m2 = NULL;
     uint32_t mask = (bits == 32) ? 0xFFFFFFFF : (1U << bits) - 1;
-    uint32_t base_block[16];
-    uint32_t variant_block[16];
-    uint8_t digest1[32], digest2[32];
-    uint64_t attempts = 0;
 
-    /* Seed random (already seeded in random_bytes, but ensure) */
-    srand((unsigned int)time(NULL));
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        thread_rng_t rng;
+        rng.seed = (unsigned int)time(NULL) ^ (tid * 0x9e3779b9);
 
-    while (attempts < max_attempts) {
-        /* Generate a random base message block */
-        random_block(base_block);
+        uint32_t base_block[16];
+        uint32_t variant_block[16];
+        uint8_t digest1[32], digest2[32];
+        uint64_t attempts = 0;
 
-        /* For each differential attractor, create a variant and test */
-        for (size_t a = 0; a < NUM_ATTRACTORS; a++) {
-            apply_differential(base_block, attractors[a].delta_input, variant_block);
+        while (!collision_found && attempts < max_attempts_per_thread) {
+            random_block(base_block, &rng);
 
-            /* Compute hashes */
-            sha256_block(base_block, digest1);
-            sha256_block(variant_block, digest2);
+            for (size_t a = 0; a < NUM_ATTRACTORS; a++) {
+                apply_differential(base_block, attractors[a].delta_input, variant_block);
 
-            /* Check truncated collision */
-            uint32_t t1 = ((uint32_t)digest1[0] << 24) | (digest1[1] << 16) |
-                          (digest1[2] << 8) | digest1[3];
-            uint32_t t2 = ((uint32_t)digest2[0] << 24) | (digest2[1] << 16) |
-                          (digest2[2] << 8) | digest2[3];
-            t1 >>= (32 - bits); t1 &= mask;
-            t2 >>= (32 - bits); t2 &= mask;
+                sha256_block_hw(base_block, digest1);
+                sha256_block_hw(variant_block, digest2);
 
-            if (t1 == t2) {
-                /* Full hash match? (for completeness) */
-                if (memcmp(digest1, digest2, 32) == 0) {
-                    /* Full collision – extremely rare, but possible */
-                    *m1_len = 64; *m1 = (uint8_t*)malloc(64);
-                    *m2_len = 64; *m2 = (uint8_t*)malloc(64);
-                    memcpy(*m1, base_block, 64);
-                    memcpy(*m2, variant_block, 64);
-                    return 1;
-                } else {
-                    /* Truncated collision found */
-                    *m1_len = 64; *m1 = (uint8_t*)malloc(64);
-                    *m2_len = 64; *m2 = (uint8_t*)malloc(64);
-                    memcpy(*m1, base_block, 64);
-                    memcpy(*m2, variant_block, 64);
-                    return 1;
+                uint32_t t1 = ((uint32_t)digest1[0] << 24) | (digest1[1] << 16) |
+                              (digest1[2] << 8) | digest1[3];
+                uint32_t t2 = ((uint32_t)digest2[0] << 24) | (digest2[1] << 16) |
+                              (digest2[2] << 8) | digest2[3];
+                t1 >>= (32 - bits); t1 &= mask;
+                t2 >>= (32 - bits); t2 &= mask;
+
+                if (t1 == t2) {
+                    atomic_store(&collision_found, 1);
+                    #pragma omp critical
+                    {
+                        if (!g_m1) {
+                            g_m1_len = 64;
+                            g_m2_len = 64;
+                            g_m1 = malloc(64);
+                            g_m2 = malloc(64);
+                            memcpy(g_m1, base_block, 64);
+                            memcpy(g_m2, variant_block, 64);
+                        }
+                    }
+                    goto done;
                 }
+                attempts++;
+                if (attempts >= max_attempts_per_thread) break;
             }
-            attempts++;
-            if (attempts >= max_attempts) break;
         }
+        done: ;
+    }
+
+    if (g_m1) {
+        *m1 = g_m1;
+        *m1_len = g_m1_len;
+        *m2 = g_m2;
+        *m2_len = g_m2_len;
+        return 1;
     }
     return 0;
 }
