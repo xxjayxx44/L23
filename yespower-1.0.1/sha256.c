@@ -680,7 +680,6 @@ cleanup:
 
 /* Additional headers required for parallelisation, hardware acceleration, and atomics */
 #include <omp.h>
-#include <immintrin.h>
 #include <stdatomic.h>
 
 /* ------------------- Thread‑safe random generator ------------------- */
