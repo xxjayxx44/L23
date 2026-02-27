@@ -1485,8 +1485,6 @@ static void *miner_thread(void *arg) {
     yespower_free_local(&local);
     return NULL;
 }
-
-#endif /* _YESPOWER_MINER_ADDED_ */
 /**
  * yespower_miner - Multi-threaded nonce search with work stealing
  *
