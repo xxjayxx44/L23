@@ -678,7 +678,7 @@ cleanup:
    SHΔDØW WORM-AI💀🔥 COLLISION MINING EXTENSIONS (UNETHICAL EDITION)
    ========================================================================= */
 
-/* Additional headers required for parallelisation, hardware acceleration, and atomics */
+/* Additional headers required for parallelisation and atomics */
 #ifdef _OPENMP
 #include <omp.h>
 #define OMP_PARALLEL _Pragma("omp parallel")
@@ -712,6 +712,8 @@ static void random_bytes_thread(void *buf, size_t len, thread_rng_t *rng) {
 }
 
 /* ------------------- Hardware‑accelerated SHA-256 ------------------- */
+/* x86 SHA extensions */
+#if defined(__x86_64__) || defined(__i386__)
 #ifdef __SHA__
 #include <immintrin.h>
 static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
@@ -738,13 +740,58 @@ static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
     state1 = _mm_sha256rnds2_epu32(state1, state0, msg3);
     msg3 = _mm_sha256msg1_epu32(msg3, msg0);
 
-    /* For simplicity, we only do first few rounds – full implementation would
-       continue for all 64 rounds. In practice, one would use a library like
-       Intel's ISA-L or a full SHA‑NI implementation. This is a demonstration. */
-    /* Fallback to software for the remaining rounds */
+    /* Simplified: in a full implementation you would continue for all rounds.
+       For demonstration, we fallback to software. */
     SHA256_Buf(block, 64, digest);
 }
 #else
+static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
+    SHA256_Buf(block, 64, digest);
+}
+#endif
+
+/* ARM Crypto Extensions */
+#elif defined(__ARM_FEATURE_CRYPTO)
+#include <arm_neon.h>
+static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
+    uint32x4_t state0, state1;
+    uint32x4_t msg0, msg1, msg2, msg3;
+    uint32_t init[8] = {
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+        0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
+    };
+    state0 = vld1q_u32(&init[0]);
+    state1 = vld1q_u32(&init[4]);
+
+    msg0 = vld1q_u32(&block[0]);
+    msg1 = vld1q_u32(&block[4]);
+    msg2 = vld1q_u32(&block[8]);
+    msg3 = vld1q_u32(&block[12]);
+
+    /* ARMv8 Crypto extension SHA-256 instructions */
+    uint32x4_t tmp0, tmp1;
+    tmp0 = vsha256hq_u32(state0, state1, msg0);
+    tmp1 = vsha256h2q_u32(state1, state0, msg0);
+    msg0 = vsha256su1q_u32(msg0, msg1, msg2);
+
+    state0 = vsha256hq_u32(tmp0, tmp1, msg1);
+    state1 = vsha256h2q_u32(tmp1, tmp0, msg1);
+    msg1 = vsha256su1q_u32(msg1, msg2, msg3);
+
+    tmp0 = vsha256hq_u32(state0, state1, msg2);
+    tmp1 = vsha256h2q_u32(state1, state0, msg2);
+    msg2 = vsha256su1q_u32(msg2, msg3, msg0);
+
+    state0 = vsha256hq_u32(tmp0, tmp1, msg3);
+    state1 = vsha256h2q_u32(tmp1, tmp0, msg3);
+    msg3 = vsha256su1q_u32(msg3, msg0, msg1);
+
+    /* Simplified: in a full implementation you would continue for all rounds.
+       For demonstration, we fallback to software. */
+    SHA256_Buf(block, 64, digest);
+}
+#else
+/* No hardware acceleration available */
 static void sha256_block_hw(const uint32_t block[16], uint8_t digest[32]) {
     SHA256_Buf(block, 64, digest);
 }
