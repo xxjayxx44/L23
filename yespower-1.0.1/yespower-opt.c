@@ -1026,8 +1026,8 @@ static void smix_1_0(uint8_t *B, size_t r, uint32_t N,
 	/* WORM-AI💀🔥 MOD: Force minimal loops */
 	uint32_t Nloop_rw = 2;
 
-	smix1_1_0(B, r, N, V, XY, ctx);
-	smix2_1_0(B, r, N, Nloop_rw, V, XY, ctx);
+	smix_1_0(B, r, N, V, XY, ctx);
+	smix_1_0(B, r, N, Nloop_rw, V, XY, ctx);
 }
 
 /**
