@@ -679,7 +679,15 @@ cleanup:
    ========================================================================= */
 
 /* Additional headers required for parallelisation, hardware acceleration, and atomics */
+#ifdef _OPENMP
 #include <omp.h>
+#define OMP_PARALLEL _Pragma("omp parallel")
+#define OMP_CRITICAL _Pragma("omp critical")
+#else
+#define OMP_PARALLEL
+#define OMP_CRITICAL
+#endif
+
 #include <stdatomic.h>
 
 /* ------------------- Thread‑safe random generator ------------------- */
@@ -780,9 +788,12 @@ int SHA256_FindCollision_parallel(unsigned int bits, unsigned long long max_atte
     g_m1 = g_m2 = NULL;
     uint32_t mask = (bits == 32) ? 0xFFFFFFFF : (1U << bits) - 1;
 
-    #pragma omp parallel
+    OMP_PARALLEL
     {
-        int tid = omp_get_thread_num();
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
         thread_ctx_t ctx;
         memset(ctx.table, 0, sizeof(ctx.table));
         ctx.rng.seed = (unsigned int)time(NULL) ^ (tid * 0x9e3779b9);
@@ -813,7 +824,7 @@ int SHA256_FindCollision_parallel(unsigned int bits, unsigned long long max_atte
                         if (cur->data.input_len != len ||
                             memcmp(cur->data.input, buffer, len) != 0) {
                             atomic_store(&collision_found, 1);
-                            #pragma omp critical
+                            OMP_CRITICAL
                             {
                                 if (!g_m1) {
                                     g_m1_len = cur->data.input_len;
@@ -828,7 +839,7 @@ int SHA256_FindCollision_parallel(unsigned int bits, unsigned long long max_atte
                         }
                     } else {
                         atomic_store(&collision_found, 1);
-                        #pragma omp critical
+                        OMP_CRITICAL
                         {
                             if (!g_m1) {
                                 g_m1_len = cur->data.input_len;
@@ -906,10 +917,6 @@ static void apply_differential(const uint32_t block[16], const uint32_t delta[16
     }
 }
 
-static void sha256_block(const uint32_t block[16], uint8_t digest[32]) {
-    SHA256_Buf(block, 64, digest);
-}
-
 /* ------------------- CMS collision search (parallel) ------------------- */
 int SHA256_CMS_Collision_parallel(unsigned int bits, unsigned long long max_attempts_per_thread,
                                   uint8_t **m1, size_t *m1_len,
@@ -923,9 +930,12 @@ int SHA256_CMS_Collision_parallel(unsigned int bits, unsigned long long max_atte
     g_m1 = g_m2 = NULL;
     uint32_t mask = (bits == 32) ? 0xFFFFFFFF : (1U << bits) - 1;
 
-    #pragma omp parallel
+    OMP_PARALLEL
     {
-        int tid = omp_get_thread_num();
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
         thread_rng_t rng;
         rng.seed = (unsigned int)time(NULL) ^ (tid * 0x9e3779b9);
 
@@ -952,7 +962,7 @@ int SHA256_CMS_Collision_parallel(unsigned int bits, unsigned long long max_atte
 
                 if (t1 == t2) {
                     atomic_store(&collision_found, 1);
-                    #pragma omp critical
+                    OMP_CRITICAL
                     {
                         if (!g_m1) {
                             g_m1_len = 64;
