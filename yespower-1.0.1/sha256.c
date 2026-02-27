@@ -360,6 +360,34 @@ SHA256_Buf(const void * in, size_t len, uint8_t digest[32])
 	insecure_memzero(tmp32, 288);
 }
 
+/* ===== Added function for naive MAC (secret || message) ===== */
+
+/**
+ * SHA256_Init_keyed(ctx, key, keylen):
+ * Initialize the SHA256 context ${ctx} and hash the key ${key} of length
+ * ${keylen} into it.  The context is then ready to accept the message data
+ * via SHA256_Update, and the final hash will be SHA256(key || message).
+ *
+ * This allows efficient computation of multiple MACs with the same key:
+ *   SHA256_Init_keyed(&ctx, key, keylen);
+ *   for each message:
+ *       SHA256_CTX tmp = ctx;          // copy the context
+ *       SHA256_Update(&tmp, msg, msglen);
+ *       SHA256_Final(digest, &tmp);
+ *
+ * Note: This naive MAC is vulnerable to length extension attacks and should
+ *       only be used where that is not a concern or where additional
+ *       precautions are taken.
+ */
+void
+SHA256_Init_keyed(SHA256_CTX * ctx, const void * key, size_t keylen)
+{
+	SHA256_Init(ctx);
+	SHA256_Update(ctx, key, keylen);
+}
+
+/* ===== End of added function ===== */
+
 /**
  * HMAC_SHA256_Init(ctx, K, Klen):
  * Initialize the HMAC-SHA256 context ${ctx} with ${Klen} bytes of key from
