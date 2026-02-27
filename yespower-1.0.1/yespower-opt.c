@@ -660,7 +660,6 @@ static volatile uint64_t Smask2var = Smask2;
 #define Smask2 Smask2_1_0
 
 #endif
-
 /**
  * blockmix_pwxform(Bin, Bout, r, S):
  * Compute Bout = BlockMix_pwxform{salsa20, r, S}(Bin).  The input Bin must
@@ -1151,3 +1150,222 @@ int yespower_free_local(yespower_local_t *local)
 	return free_region(local);
 }
 #endif
+/*************************** MULTI-THREADED MINER ADDITIONS ***************************/
+#ifndef _YESPOWER_MINER_ADDED_
+#define _YESPOWER_MINER_ADDED_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <pthread.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* Atomic operations (GCC-style) */
+#ifdef __GNUC__
+#define atomic_fetch_add(ptr, val) __sync_fetch_and_add(ptr, val)
+#else
+#error "Atomic operations not supported (need GCC or compatible)"
+#endif
+
+/* Forward declaration of the favoriting callback type */
+typedef int (*yespower_favor_func_t)(uint64_t nonce, void *user_data);
+
+/* Structure for shared miner state */
+typedef struct {
+    const uint8_t *base_input;      /* Original input buffer (without nonce) */
+    size_t input_len;                /* Length of input buffer */
+    size_t nonce_offset;             /* Offset in input where nonce (uint64_t LE) should be written */
+    uint64_t start_nonce;            /* Start of global nonce range (inclusive) */
+    uint64_t end_nonce;              /* End of global nonce range (exclusive) */
+    const yespower_params_t *params; /* yespower parameters */
+    uint8_t target[32];              /* Target hash (big-endian 256-bit) */
+    yespower_favor_func_t is_favorable; /* Callback to check if nonce is favorable (can be NULL) */
+    void *favor_user_data;           /* User data for favor callback */
+
+    volatile uint64_t next_nonce;    /* Next nonce to try from global range */
+
+    /* Results: all valid nonces found */
+    uint64_t *found_nonces;          /* Dynamically allocated array */
+    size_t found_capacity;           /* Current capacity of found_nonces */
+    size_t found_count;              /* Number of valid nonces stored */
+    pthread_mutex_t lock;            /* Protects found_nonces, found_count */
+} miner_shared_t;
+
+/* Thread function */
+static void *miner_thread(void *arg) {
+    miner_shared_t *shared = (miner_shared_t *)arg;
+    yespower_local_t local;
+    uint8_t *input_copy;
+    uint64_t nonce;
+    yespower_binary_t hash;
+    int cmp;
+
+    /* Initialize thread-local yespower context */
+    if (yespower_init_local(&local) != 0) {
+        return NULL;
+    }
+
+    /* Copy input buffer to allow per-thread nonce modification */
+    input_copy = (uint8_t *)malloc(shared->input_len);
+    if (!input_copy) {
+        yespower_free_local(&local);
+        return NULL;
+    }
+    memcpy(input_copy, shared->base_input, shared->input_len);
+
+    /* Main loop: fetch next nonce and test */
+    while (1) {
+        nonce = atomic_fetch_add(&shared->next_nonce, 1);
+        if (nonce >= shared->end_nonce) {
+            break; /* No more nonces */
+        }
+
+        /* Optional favoriting check – skip unfavorable nonces */
+        if (shared->is_favorable && !shared->is_favorable(nonce, shared->favor_user_data)) {
+            continue;
+        }
+
+        /* Place nonce into input (little-endian 64-bit) */
+        *(uint64_t *)(input_copy + shared->nonce_offset) = nonce;
+
+        /* Compute yespower hash */
+        if (yespower(&local, input_copy, shared->input_len, shared->params, &hash) != 0) {
+            /* Error in yespower; skip this nonce */
+            continue;
+        }
+
+        /* Compare hash with target (big-endian 256-bit) */
+        cmp = memcmp(hash, shared->target, 32);
+        if (cmp <= 0) { /* hash <= target – valid nonce */
+            pthread_mutex_lock(&shared->lock);
+            /* Ensure enough capacity */
+            if (shared->found_count >= shared->found_capacity) {
+                size_t new_cap = shared->found_capacity ? shared->found_capacity * 2 : 64;
+                uint64_t *new_arr = (uint64_t *)realloc(shared->found_nonces,
+                                                        new_cap * sizeof(uint64_t));
+                if (new_arr) {
+                    shared->found_nonces = new_arr;
+                    shared->found_capacity = new_cap;
+                } else {
+                    /* Out of memory – just drop this nonce (should not happen) */
+                    pthread_mutex_unlock(&shared->lock);
+                    continue;
+                }
+            }
+            shared->found_nonces[shared->found_count++] = nonce;
+            pthread_mutex_unlock(&shared->lock);
+        }
+    }
+
+    free(input_copy);
+    yespower_free_local(&local);
+    return NULL;
+}
+/**
+ * yespower_miner - Multi-threaded nonce search with work stealing
+ *
+ * @base_input:     Pointer to the input buffer (without nonce). The buffer
+ *                  must remain valid for the duration of the search.
+ * @input_len:      Length of input buffer.
+ * @nonce_offset:   Offset within input where the 64-bit little-endian nonce
+ *                  should be written. The area must be writable (the function
+ *                  copies the buffer per thread).
+ * @start_nonce:    First nonce to try (inclusive).
+ * @end_nonce:      Last nonce to try (exclusive).
+ * @params:         yespower parameters (version, N, r, pers).
+ * @target:         32-byte target hash (big-endian). A hash is valid if
+ *                  memcmp(hash, target, 32) <= 0.
+ * @num_threads:    Number of worker threads to launch.
+ * @is_favorable:   Optional callback to test if a nonce should be tried.
+ *                  Return 1 to try, 0 to skip. May be NULL.
+ *                  This callback can be used to implement dynamic, automatic
+ *                  favoriting based on the current block and difficulty.
+ *                  For example, you could quickly hash the input+nonce with a
+ *                  lightweight function and skip if the result is already too
+ *                  large – but beware of false negatives.
+ * @favor_user_data:User data passed to is_favorable.
+ * @out_nonces:     Output pointer to an array of valid nonces (dynamically
+ *                  allocated). The caller must free() it.
+ * @out_count:      Number of valid nonces found.
+ *
+ * Returns 0 on success (search completed), -1 on error.
+ */
+int yespower_miner(const uint8_t *base_input, size_t input_len, size_t nonce_offset,
+                   uint64_t start_nonce, uint64_t end_nonce,
+                   const yespower_params_t *params,
+                   const uint8_t target[32],
+                   int num_threads,
+                   yespower_favor_func_t is_favorable, void *favor_user_data,
+                   uint64_t **out_nonces, size_t *out_count) {
+    pthread_t *threads;
+    miner_shared_t shared;
+    int i, ret = -1;
+
+    if (!base_input || input_len == 0 || !params || !target || num_threads <= 0 ||
+        !out_nonces || !out_count) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Initialize shared state */
+    memset(&shared, 0, sizeof(shared));
+    shared.base_input = base_input;
+    shared.input_len = input_len;
+    shared.nonce_offset = nonce_offset;
+    shared.start_nonce = start_nonce;
+    shared.end_nonce = end_nonce;
+    shared.params = params;
+    memcpy(shared.target, target, 32);
+    shared.is_favorable = is_favorable;
+    shared.favor_user_data = favor_user_data;
+    shared.next_nonce = start_nonce;
+    shared.found_nonces = NULL;
+    shared.found_capacity = 0;
+    shared.found_count = 0;
+    pthread_mutex_init(&shared.lock, NULL);
+
+    /* Create threads */
+    threads = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
+    if (!threads) {
+        pthread_mutex_destroy(&shared.lock);
+        return -1;
+    }
+
+    for (i = 0; i < num_threads; i++) {
+        if (pthread_create(&threads[i], NULL, miner_thread, &shared) != 0) {
+            /* Clean up already created threads */
+            int j;
+            for (j = 0; j < i; j++) {
+                pthread_join(threads[j], NULL);
+            }
+            free(threads);
+            pthread_mutex_destroy(&shared.lock);
+            if (shared.found_nonces) free(shared.found_nonces);
+            return -1;
+        }
+    }
+
+    /* Wait for all threads to finish */
+    for (i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    /* Set output */
+    *out_nonces = shared.found_nonces;
+    *out_count = shared.found_count;
+    ret = 0;
+
+    free(threads);
+    pthread_mutex_destroy(&shared.lock);
+    return ret;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _YESPOWER_MINER_ADDED_ */
+#endif /* _YESPOWER_OPT_C_PASS_ == 1 (end of original file) */
