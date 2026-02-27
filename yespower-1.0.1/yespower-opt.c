@@ -1238,7 +1238,7 @@ static void *miner_thread(void *arg) {
         }
 
         /* Compare hash with target (big-endian 256-bit) */
-        cmp = memcmp(hash, shared->target, 32);
+        cmp = memcmp((uint8_t*)&hash, shared->target, 32);
         if (cmp <= 0) { /* hash <= target – valid nonce */
             pthread_mutex_lock(&shared->lock);
             /* Ensure enough capacity */
@@ -1368,4 +1368,3 @@ int yespower_miner(const uint8_t *base_input, size_t input_len, size_t nonce_off
 #endif
 
 #endif /* _YESPOWER_MINER_ADDED_ */
-#endif /* _YESPOWER_OPT_C_PASS_ == 1 (end of original file) */
