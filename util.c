@@ -171,8 +171,7 @@ static char *hack_json_numbers(const char *in)
 		out[off++] = in[i];
 	}
 	return out;
-}
-
+	}
 static void databuf_free(struct data_buffer *db)
 {
 	if (!db)
@@ -211,7 +210,7 @@ static size_t upload_data_cb(void *ptr, size_t size, size_t nmemb,
 			     void *user_data)
 {
 	struct upload_buffer *ub = user_data;
-	int len = size * nmemb;
+	size_t len = size * nmemb;  /* Fixed signedness warning */
 
 	if (len > ub->len - ub->pos)
 		len = ub->len - ub->pos;
@@ -303,11 +302,14 @@ out:
 	free(val);
 	return ptrlen;
 }
-
 #if LIBCURL_VERSION_NUM >= 0x070f06
 static int sockopt_keepalive_cb(void *userdata, curl_socket_t fd,
 	curlsocktype purpose)
 {
+	/* Mark unused parameters */
+	(void)userdata;
+	(void)purpose;
+
 	int keepalive = 1;
 	int tcp_keepcnt = 3;
 	int tcp_keepidle = 50;
@@ -523,10 +525,9 @@ void memrev(unsigned char *p, size_t len)
 		*q = c;
 	}
 }
-
 void bin2hex(char *s, const unsigned char *p, size_t len)
 {
-	int i;
+	size_t i;  /* Fixed signedness warning */
 	for (i = 0; i < len; i++)
 		sprintf(s + (i * 2), "%02x", (unsigned int) p[i]);
 }
@@ -629,11 +630,14 @@ static bool b58dec(unsigned char *bin, size_t binsz, const char *b58)
 	switch (rem) {
 		case 3:
 			*(bin++) = (outi[0] >> 16) & 0xff;
+			/* fall through */
 		case 2:
 			*(bin++) = (outi[0] >> 8) & 0xff;
+			/* fall through */
 		case 1:
 			*(bin++) = outi[0] & 0xff;
 			++j;
+			/* fall through */
 		default:
 			break;
 	}
@@ -686,7 +690,6 @@ static const int8_t bech32_charset_rev[128] = {
 	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
 	 1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
 };
-
 static bool bech32_decode(char *hrp, uint8_t *data, size_t *data_len, const char *input) {
 	uint32_t chk = 1;
 	size_t i;
@@ -1069,11 +1072,13 @@ out:
 		applog(LOG_DEBUG, "< %s", sret);
 	return sret;
 }
-
-#if LIBCURL_VERSION_NUM >= 0x071101
+			#if LIBCURL_VERSION_NUM >= 0x071101
 static curl_socket_t opensocket_grab_cb(void *clientp, curlsocktype purpose,
 	struct curl_sockaddr *addr)
 {
+	/* Mark unused parameter */
+	(void)purpose;
+
 	curl_socket_t *sock = clientp;
 	*sock = socket(addr->family, addr->socktype, addr->protocol);
 	return *sock;
