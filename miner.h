@@ -381,6 +381,9 @@ static inline int is_favorable_hash(uint32_t hash, uint32_t threshold, uint32_t 
 static inline int gate_fulltest(const uint32_t *hash, const uint32_t *target, 
 								uint32_t bias_threshold, uint32_t skip_pattern)
 {
+	/* Suppress unused parameter warning */
+	(void)target;
+
 	/* Quick pre-check before full comparison */
 	if (bias_threshold > 0) {
 		/* Check if hash passes initial bias gate */
