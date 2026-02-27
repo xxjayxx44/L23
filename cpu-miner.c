@@ -58,6 +58,7 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+	(void)id; /* unused parameter */
 	cpu_set_t set;
 
 	CPU_ZERO(&set);
@@ -72,6 +73,7 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+	(void)id; /* unused parameter */
 	cpuset_t set;
 	CPU_ZERO(&set);
 	CPU_SET(cpu, &set);
@@ -84,6 +86,8 @@ static inline void drop_policy(void)
 
 static inline void affine_to_cpu(int id, int cpu)
 {
+	(void)id; /* unused parameter */
+	(void)cpu;
 }
 #endif
 		
@@ -99,7 +103,6 @@ struct workio_cmd {
 		struct work	*work;
 	} u;
 };
-
 enum algos {
 	ALGO_SUGAR_YESPOWER_1_0_1,
 	ALGO_ISO_YESPOWER_1_0_1,
@@ -240,7 +243,6 @@ static char const short_options[] =
 	"S"
 #endif
 	"a:c:Dhp:Px:qr:R:s:t:T:o:u:O:V";
-
 static struct option const options[] = {
 	{ "algo", 1, NULL, 'a' },
 #ifndef WIN32
@@ -343,7 +345,7 @@ static bool jobj_binary(const json_t *obj, const char *key,
 
 static bool work_decode(const json_t *val, struct work *work)
 {
-	int i;
+	size_t i;
 
 	if (unlikely(!jobj_binary(val, "data", work->data, sizeof(work->data)))) {
 		applog(LOG_ERR, "JSON invalid data");
@@ -425,8 +427,7 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 	if (unlikely(!jobj_binary(val, "previousblockhash", prevhash, sizeof(prevhash)))) {
 		applog(LOG_ERR, "JSON invalid previousblockhash");
 		goto out;
-	}
-
+}
 	tmp = json_object_get(val, "curtime");
 	if (!tmp || !json_is_integer(tmp)) {
 		applog(LOG_ERR, "JSON invalid curtime");
@@ -631,8 +632,7 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 		n /= 2;
 		for (i = 0; i < n; i++)
 			sha256d(merkle_tree[i], merkle_tree[2*i], 64);
-	}
-
+}
 	/* assemble block header */
 	work->data[0] = swab32(version);
 	for (i = 0; i < 8; i++)
@@ -649,7 +649,7 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 		applog(LOG_ERR, "JSON invalid target");
 		goto out;
 	}
-	for (i = 0; i < ARRAY_SIZE(work->target); i++)
+	for (i = 0; i < (int)ARRAY_SIZE(work->target); i++)
 		work->target[7 - i] = be32dec(target + i);
 
 	tmp = json_object_get(val, "workid");
@@ -716,7 +716,7 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 	json_t *val, *res, *reason;
 	char data_str[2 * sizeof(work->data) + 1];
 	char s[345];
-	int i;
+	size_t i;
 	bool rc = false;
 
 	/* pass if the previous hash is not the current previous hash */
@@ -829,7 +829,6 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 out:
 	return rc;
 }
-
 static const char *getwork_req =
 	"{\"method\": \"getwork\", \"params\": [], \"id\":0}\r\n";
 
@@ -1080,11 +1079,10 @@ err_out:
 	workio_cmd_free(wc);
 	return false;
 }
-
 static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 {
 	unsigned char merkle_root[64];
-	int i;
+	size_t i;
 
 	pthread_mutex_lock(&sctx->work_lock);
 
@@ -1132,12 +1130,14 @@ static void *miner_thread(void *userdata)
 {
 	struct thr_info *mythr = userdata;
 	int thr_id = mythr->id;
-	struct work work = {{0}};
+	struct work work;
 	uint32_t max_nonce;
 	uint32_t start_nonce = 0xffffffffU / opt_n_threads * thr_id;
 	uint32_t end_nonce = 0xffffffffU / opt_n_threads * (thr_id + 1) - 0x20;
 	char s[16];
 	int i;
+
+	memset(&work, 0, sizeof(work));
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -1305,7 +1305,6 @@ static void *miner_thread(void *userdata)
 			/* should never happen */
 			goto out;
 		}
-
 		/* record scanhash elapsed time */
 		gettimeofday(&tv_end, NULL);
 		timeval_subtract(&diff, &tv_end, &tv_start);
@@ -1604,7 +1603,8 @@ static void parse_config(json_t *config, char *pname, char *ref);
 static void parse_arg(int key, char *arg, char *pname)
 {
 	char *p;
-	int v, i;
+	int v;
+	size_t i;
 
 	switch(key) {
 	case 'a':
@@ -1819,8 +1819,10 @@ static void parse_arg(int key, char *arg, char *pname)
 		break;
 	case 'V':
 		show_version_and_exit();
+		break; /* unreachable but avoids fallthrough warning */
 	case 'h':
 		show_usage_and_exit(0);
+		break; /* unreachable but avoids fallthrough warning */
 	default:
 		show_usage_and_exit(1);
 	}
@@ -1828,7 +1830,7 @@ static void parse_arg(int key, char *arg, char *pname)
 
 static void parse_config(json_t *config, char *pname, char *ref)
 {
-	int i;
+	size_t i;
 	char *s;
 	json_t *val;
 
