@@ -210,7 +210,7 @@ static size_t upload_data_cb(void *ptr, size_t size, size_t nmemb,
 			     void *user_data)
 {
 	struct upload_buffer *ub = user_data;
-	size_t len = size * nmemb;  /* Fixed signedness warning */
+	size_t len = size * nmemb;
 
 	if (len > ub->len - ub->pos)
 		len = ub->len - ub->pos;
@@ -306,7 +306,6 @@ out:
 static int sockopt_keepalive_cb(void *userdata, curl_socket_t fd,
 	curlsocktype purpose)
 {
-	/* Mark unused parameters */
 	(void)userdata;
 	(void)purpose;
 
@@ -370,14 +369,14 @@ json_t *json_rpc_call(CURL *curl, const char *url,
 	/* it is assumed that 'curl' is freshly [re]initialized at this pt */
 
 	if (opt_protocol)
-		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, (long)1);
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	if (opt_cert)
 		curl_easy_setopt(curl, CURLOPT_CAINFO, opt_cert);
 	curl_easy_setopt(curl, CURLOPT_ENCODING, "");
-	curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0);
-	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
-	curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1);
+	curl_easy_setopt(curl, CURLOPT_FAILONERROR, (long)0);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, (long)1);
+	curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, (long)1);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, all_data_cb);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &all_data);
 	curl_easy_setopt(curl, CURLOPT_READFUNCTION, upload_data_cb);
@@ -388,23 +387,23 @@ json_t *json_rpc_call(CURL *curl, const char *url,
 #endif
 	curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_err_str);
 	if (opt_redirect)
-		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
+		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, (long)1);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
 	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, resp_hdr_cb);
 	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hi);
 	if (opt_proxy) {
 		curl_easy_setopt(curl, CURLOPT_PROXY, opt_proxy);
-		curl_easy_setopt(curl, CURLOPT_PROXYTYPE, opt_proxy_type);
+		curl_easy_setopt(curl, CURLOPT_PROXYTYPE, (long)opt_proxy_type);
 	}
 	if (userpass) {
 		curl_easy_setopt(curl, CURLOPT_USERPWD, userpass);
-		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
 	}
 #if LIBCURL_VERSION_NUM >= 0x070f06
 	if (flags & JSON_RPC_LONGPOLL)
 		curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_keepalive_cb);
 #endif
-	curl_easy_setopt(curl, CURLOPT_POST, 1);
+	curl_easy_setopt(curl, CURLOPT_POST, (long)1);
 
 	if (opt_protocol)
 		applog(LOG_DEBUG, "JSON protocol request:\n%s\n", rpc_req);
@@ -515,7 +514,6 @@ err_out:
 	curl_easy_reset(curl);
 	return NULL;
 }
-
 void memrev(unsigned char *p, size_t len)
 {
 	unsigned char c, *q;
@@ -525,9 +523,10 @@ void memrev(unsigned char *p, size_t len)
 		*q = c;
 	}
 }
+
 void bin2hex(char *s, const unsigned char *p, size_t len)
 {
-	size_t i;  /* Fixed signedness warning */
+	size_t i;
 	for (i = 0; i < len; i++)
 		sprintf(s + (i * 2), "%02x", (unsigned int) p[i]);
 }
@@ -596,7 +595,6 @@ int varint_encode(unsigned char *p, uint64_t n)
 	}
 	return 9;
 }
-
 static const char b58digits[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 static bool b58dec(unsigned char *bin, size_t binsz, const char *b58)
@@ -690,6 +688,7 @@ static const int8_t bech32_charset_rev[128] = {
 	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
 	 1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
 };
+
 static bool bech32_decode(char *hrp, uint8_t *data, size_t *data_len, const char *input) {
 	uint32_t chk = 1;
 	size_t i;
@@ -798,7 +797,6 @@ static size_t bech32_to_script(uint8_t *out, size_t outsz, const char *addr) {
 	memcpy(out + 2, witprog, witprog_len);
 	return witprog_len + 2;
 }
-
 size_t address_to_script(unsigned char *out, size_t outsz, const char *addr)
 {
 	unsigned char addrbin[25];
@@ -1071,12 +1069,11 @@ out:
 	if (sret && opt_protocol)
 		applog(LOG_DEBUG, "< %s", sret);
 	return sret;
-}
+		}
 			#if LIBCURL_VERSION_NUM >= 0x071101
 static curl_socket_t opensocket_grab_cb(void *clientp, curlsocktype purpose,
 	struct curl_sockaddr *addr)
 {
-	/* Mark unused parameter */
 	(void)purpose;
 
 	curl_socket_t *sock = clientp;
@@ -1116,20 +1113,20 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 	sprintf(sctx->curl_url, "http%s", url + 11);
 
 	if (opt_protocol)
-		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, (long)1);
 	curl_easy_setopt(curl, CURLOPT_URL, sctx->curl_url);
 	if (opt_cert)
 		curl_easy_setopt(curl, CURLOPT_CAINFO, opt_cert);
-	curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1);
-	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30);
+	curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, (long)1);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)30);
 	curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, sctx->curl_err_str);
-	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
-	curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, (long)1);
+	curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, (long)1);
 	if (opt_proxy) {
 		curl_easy_setopt(curl, CURLOPT_PROXY, opt_proxy);
-		curl_easy_setopt(curl, CURLOPT_PROXYTYPE, opt_proxy_type);
+		curl_easy_setopt(curl, CURLOPT_PROXYTYPE, (long)opt_proxy_type);
 	}
-	curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1);
+	curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, (long)1);
 #if LIBCURL_VERSION_NUM >= 0x070f06
 	curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_keepalive_cb);
 #endif
@@ -1137,7 +1134,7 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 	curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, opensocket_grab_cb);
 	curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &sctx->sock);
 #endif
-	curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1);
+	curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, (long)1);
 
 	rc = curl_easy_perform(curl);
 	if (rc) {
